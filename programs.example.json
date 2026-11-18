@@ -1,0 +1,6 @@
+{
+  "programs": {
+    "claude": { "name": "Claude", "icon": "icons/claude.svg", "run": ["claude"] },
+    "codex":  { "name": "Codex",  "icon": "icons/codex.svg",  "run": ["codex", "--no-daemon"] }
+  }
+}

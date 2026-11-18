@@ -1,0 +1,115 @@
+{
+  "default_preset": "solo",
+  "youtrack": {
+    "ns": "",
+    "board": "",
+    "env": "~/.config/youtrack-cli/.env",
+    "fields": {
+      "state": "State",
+      "dev": "Assignee",
+      "test": "",
+      "priority": "Priority",
+      "type": "Type",
+      "stage": "",
+      "products": ""
+    },
+    "done": [
+      "Fixed",
+      "Verified",
+      "Done",
+      "Won't fix",
+      "Duplicate",
+      "Obsolete"
+    ],
+    "products": {}
+  },
+  "open_with": [
+    {
+      "domains": [
+        "corp.example.com"
+      ],
+      "run": "~/.local/bin/ssh-browser"
+    }
+  ],
+  "models": {
+    "claude": [
+      "fable",
+      "opus",
+      "sonnet",
+      "haiku"
+    ],
+    "codex": [
+      "gpt-6.2-sol",
+      "gpt-6.2-astra",
+      "gpt-6.1-sol",
+      "gpt-6.1-terra",
+      "gpt-6-luna"
+    ]
+  },
+  "namespaces": {
+    "work": {
+      "label": "Work",
+      "machine": "",
+      "repos": "~/src/work",
+      "tasks": "~/src/work/.tasks",
+      "wrappers": {
+        "claude": "claude",
+        "codex": "codex"
+      },
+      "docs": {
+        "clone": "docs",
+        "always": [],
+        "per_repo": "services/{repo}"
+      },
+      "roles": {
+        "impl": "claude",
+        "review": "codex",
+        "qa": "claude"
+      }
+    },
+    "personal": {
+      "label": "Personal",
+      "machine": "",
+      "repos": "~/src/personal",
+      "tasks": "~/src/personal/.tasks",
+      "wrappers": {
+        "claude": "claude",
+        "codex": "codex"
+      },
+      "roles": {
+        "impl": "claude",
+        "review": "claude",
+        "qa": "claude"
+      }
+    }
+  },
+  "presets": {
+    "solo": {
+      "label": "Один исполнитель",
+      "roles": [
+        "impl"
+      ],
+      "flow": "flow-solo.md",
+      "about": "один исполнитель"
+    },
+    "pair": {
+      "label": "С ревьюером",
+      "roles": [
+        "impl",
+        "review"
+      ],
+      "flow": "flow-pair.md",
+      "about": "исполнитель и ревьюер: ревью по кругу, пока нет замечаний"
+    },
+    "trio": {
+      "label": "С ревьюером и тестировщиком",
+      "roles": [
+        "impl",
+        "review",
+        "qa"
+      ],
+      "flow": "flow-trio.md",
+      "about": "исполнитель, ревьюер и тестировщик: план тестов, ревью, прогон"
+    }
+  }
+}

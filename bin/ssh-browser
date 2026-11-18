@@ -1,0 +1,95 @@
+#!/usr/bin/env bash
+# A Chrome profile whose chosen domains and subnets go through an SSH SOCKS tunnel to a remote
+# machine (one that sits inside a private network, e.g. behind a corporate VPN); everything else
+# goes the usual way. The tunnel exists only while this Chrome profile is running (until Cmd+Q).
+#
+#   ssh-browser [url...]     open the profile (or hand it the URLs); raise the tunnel if it is down
+#   ssh-browser --tunnel     only raise the tunnel if it is down
+#   ssh-browser --reconnect  close the tunnel and raise it again (it is up, but the private sites don't answer)
+#   ssh-browser --status     print off | down | nocorp | up; closes a tunnel left after Cmd+Q
+#   ssh-browser --label      print the name the status bar shows
+#
+# Settings: ~/.config/ssh-browser/config (a shell file, see ssh-browser.example.conf next to this script),
+# or the file named by SSH_BROWSER_CONFIG. The ssh-browser mod in Herdr's status bar uses
+# --label, --status, --tunnel and --reconnect.
+set -euo pipefail
+
+# Herdr's hc exec kills what it started by HC_SCOPE; the tunnel and Chrome must outlive the caller.
+unset HC_SCOPE
+
+conf="${SSH_BROWSER_CONFIG:-$HOME/.config/ssh-browser/config}"
+SSH_HOST="" LABEL="" DOMAINS="" SUBNETS="" PROBE_URL="" FALLBACK="DIRECT" PORT=1081 PROFILE="" CTL=""
+CHROME="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+# shellcheck disable=SC1090
+[ -f "$conf" ] && . "$conf"
+if [ -z "$SSH_HOST" ]; then
+  [ "${1:-}" = --status ] && { echo off; exit 0; }
+  [ "${1:-}" = --label ] && { echo "SSH browser"; exit 0; }
+  echo "ssh-browser: no SSH_HOST in $conf" >&2; exit 1
+fi
+LABEL="${LABEL:-$SSH_HOST browser}"
+profile="$HOME/Library/Application Support/Google/${PROFILE:-Chrome-$SSH_HOST}"
+ctl="${CTL:-$HOME/.ssh/ssh-browser-$SSH_HOST.ctl}"
+
+# The PAC: each domain with its subdomains, each subnet (address/mask) for hosts given by IP.
+rules=""
+for d in $DOMAINS; do rules+="host == '$d' || dnsDomainIs(host, '.$d') || "; done
+nets=""
+for n in $SUBNETS; do nets+="isInNet(host, '${n%/*}', '${n#*/}') || "; done
+pac="function FindProxyForURL(url, host) {
+  if (${rules}false) return 'SOCKS5 127.0.0.1:$PORT';
+  if (/^\\d+\\.\\d+\\.\\d+\\.\\d+\$/.test(host) && (${nets}false)) return 'SOCKS5 127.0.0.1:$PORT';
+  return '$FALLBACK';
+}"
+pac_url="data:application/x-ns-proxy-autoconfig;base64,$(printf %s "$pac" | base64 | tr -d '\n')"
+
+running() { pgrep -qf -- "--user-data-dir=$profile"; }
+tunnel_alive() { ssh -S "$ctl" -O check "$SSH_HOST" 2>/dev/null; }
+tunnel_close() { ssh -S "$ctl" -O exit "$SSH_HOST" >/dev/null 2>&1 || true; }
+
+# A dead connection (sleep, another Wi-Fi) is noticed within ~45 s and the master exits,
+# so the status bar sees it as down instead of a tunnel that hangs every request.
+tunnel_up() {
+  tunnel_alive && return 0
+  rm -f "$ctl"
+  local err
+  err=$(ssh -f -N -M -S "$ctl" -o ExitOnForwardFailure=yes -o ConnectTimeout=8 \
+    -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
+    -D "127.0.0.1:$PORT" "$SSH_HOST" </dev/null 2>&1 >/dev/null) || { echo "${err:-ssh $SSH_HOST failed}" >&2; return 1; }
+}
+
+case "${1:-}" in
+  --label)
+    echo "$LABEL"; exit 0 ;;
+  --status)
+    if ! running; then
+      # Older than a minute, so a tunnel raised for a Chrome that is still starting is left alone.
+      [ -n "$(find "$ctl" -mmin +1 2>/dev/null)" ] && tunnel_alive && tunnel_close
+      echo off
+    elif ! tunnel_alive; then
+      echo down
+    elif [ -n "$PROBE_URL" ] && [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 6 --socks5-hostname "127.0.0.1:$PORT" "$PROBE_URL" || true)" = 000 ]; then
+      echo nocorp
+    else
+      echo up
+    fi
+    exit 0 ;;
+  --tunnel)
+    tunnel_up; exit ;;
+  --reconnect)
+    tunnel_close
+    tunnel_up; exit ;;
+esac
+
+tunnel_up
+
+# Profile already running: hand the URLs to it.
+if running; then
+  exec "$CHROME" --user-data-dir="$profile" "$@" </dev/null >/dev/null 2>&1
+fi
+
+(
+  "$CHROME" --user-data-dir="$profile" --proxy-pac-url="$pac_url" "$@" >/dev/null 2>&1 || true
+  tunnel_close
+) </dev/null >/dev/null 2>&1 &
+disown

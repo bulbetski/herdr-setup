@@ -1,0 +1,12 @@
+{
+  "name": "Whitby Light",
+  "base": "light-ansi",
+  "overrides": {
+    "userMessageBackground": "#f0f0f3",
+    "userMessageBackgroundHover": "#e8e8ec",
+    "bashMessageBackgroundColor": "#f0f0f3",
+    "memoryBackgroundColor": "#f0f0f3",
+    "selectionBg": "#a9cdfb",
+    "composerSidebarBackground": "#f9f9fb"
+  }
+}

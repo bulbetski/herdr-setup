@@ -1,0 +1,1118 @@
+#!/usr/bin/env python3
+"""herdr-task: a dev task in its own Herdr space, worked by a team of agents.
+
+A task is a folder (TASK.md, AGENTS.md, meta.json, team.json, context/) with a git worktree of the task
+branch per repo, on the machine of its namespace (see `namespaces` in config.json). `start` makes it and opens a space for
+it in the window: one tab per role of the preset (impl, review, qa), each an agent with its brief. The
+agents talk to each other with `hc send`; their addresses are in team.json.
+
+  herdr-task start --ns work --yt PROJ-123 [--preset pair] [--repos a,b] [--context p1,p2]
+  herdr-task start --ns personal --title "..." --desc "..." --repos a,b --team impl=claude:opus,review=claude:sonnet
+  herdr-task open KEY            show its space, or open it again with the agents continuing
+  herdr-task sessions KEY        the agents' conversations in the task, newest first (live ones: in which tab)
+  herdr-task chat KEY --agent claude [--model opus] [--message "..."]   a new chat tab in the task's space
+  herdr-task chat KEY --resume <session id> --agent codex --folder <its folder>   continue a conversation there
+  herdr-task ls [--ns NS]        tasks as JSON
+  herdr-task board               the YouTrack sprint board as JSON (read-only)
+  herdr-task issue KEY           one YouTrack issue as JSON: description, attachments, comments, a guess of its repos
+  herdr-task files KEY           its attachments copied here (mods/tasks/.cache/yt/KEY/), images also as PNG
+  herdr-task repos --ns NS       the namespace's clones as JSON
+  herdr-task presets             presets as JSON
+
+Settings, presets and role briefs: ~/.config/herdr-app/mods/tasks/ (config.json, roles/*.md); with no
+config.json yet, config.example.json is used.
+Work on another machine runs there: this file is piped to `hc exec --on <machine> python3 -`.
+"""
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+import urllib.parse
+import urllib.request
+
+HOME = os.path.expanduser("~")
+
+
+class Fail(Exception):
+    pass
+
+
+# ---------- on the task's machine (called directly here, or through hc exec there) ----------
+
+def sh(args, cwd=None, timeout=120):
+    r = subprocess.run(args, cwd=cwd, capture_output=True, text=True, timeout=timeout)
+    return r.returncode, r.stdout.strip(), r.stderr.strip()
+
+
+def git(path, *args, timeout=120):
+    return sh(["git", "-C", path] + list(args), timeout=timeout)
+
+
+def expand(p):
+    return os.path.expanduser(p) if p else p
+
+
+def m_home(_a):
+    return HOME
+
+
+def find_clones(root):
+    """Git clones under root, up to three levels down (e.g. root/github/org/repo)."""
+    root = expand(root)
+    out = []
+
+    def walk(d, depth):
+        try:
+            names = sorted(os.listdir(d))
+        except OSError:
+            return
+        for n in names:
+            p = os.path.join(d, n)
+            if n.startswith(".") or n in ("node_modules", "vendor") or not os.path.isdir(p) or os.path.islink(p):
+                continue
+            if os.path.exists(os.path.join(p, ".git")):
+                out.append({"name": n, "path": p})
+            elif depth < 3:
+                walk(p, depth + 1)
+
+    walk(root, 1)
+    return out
+
+
+def m_repos(a):
+    return find_clones(a["root"])
+
+
+def m_tasks(a):
+    out = []
+    root = expand(a["root"])
+    try:
+        names = sorted(os.listdir(root))
+    except OSError:
+        return out
+    for n in names:
+        f = os.path.join(root, n, "meta.json")
+        try:
+            with open(f) as h:
+                m = json.load(h)
+        except (OSError, ValueError):
+            continue
+        try:
+            with open(os.path.join(root, n, "team.json")) as h:
+                team = json.load(h)
+            m["chats"] = len([k for k in team if k != "chats"]) + len(team.get("chats", []))
+        except (OSError, ValueError):
+            m["chats"] = 0
+        out.append(m)
+    return out
+
+
+def base_of(path):
+    """The branch a task starts from and its MR goes into: main, else master, else origin's HEAD."""
+    for b in ("main", "master"):
+        if git(path, "show-ref", "--verify", "--quiet", "refs/remotes/origin/" + b)[0] == 0:
+            return b
+    code, out, _ = git(path, "symbolic-ref", "--short", "refs/remotes/origin/HEAD")
+    return out.replace("origin/", "", 1) if code == 0 and out else "main"
+
+
+def parse_remote(url):
+    m = re.match(r"^(?:\w+://)?(?:[^@/]+@)?([^/:]+)[:/](.+?)(?:\.git)?/?$", url or "")
+    return (m.group(1), m.group(2)) if m else (None, None)
+
+
+def add_worktree(clone, d, branch):
+    """The task branch of one clone, checked out in <task>/<repo>."""
+    name, path = clone["name"], clone["path"]
+    git(path, "fetch", "--quiet", "origin", timeout=180)
+    base = base_of(path)
+    wt = os.path.join(d, name)
+    has = git(path, "show-ref", "--verify", "--quiet", "refs/heads/" + branch)[0] == 0
+    if has:
+        code, _, err = git(path, "worktree", "add", wt, branch)
+    else:
+        code, _, err = git(path, "worktree", "add", "--no-track", "-b", branch, wt, "origin/" + base)
+    if code != 0:
+        raise Fail("%s: %s" % (name, err))
+    host, project = parse_remote(git(path, "remote", "get-url", "origin")[1])
+    return {"name": name, "main": path, "wt": wt, "base": base, "host": host, "project": project}
+
+
+ADD_REPO_SH = r"""#!/bin/sh
+# Adds a repo to this task: a worktree of the task branch in ./<name>, recorded in meta.json.
+#   ./add-repo.sh rate-service      (a clone's name, or its full path)
+set -eu
+exec python3 - "$(cd "$(dirname "$0")" && pwd)" "$@" <<'EOF'
+import json, os, subprocess, sys
+d, want = sys.argv[1], sys.argv[2]
+meta = json.load(open(os.path.join(d, "meta.json")))
+run = lambda *a: subprocess.run(a, capture_output=True, text=True)
+path = want if want.startswith("/") else None
+if not path:
+    for root, dirs, _ in os.walk(os.path.expanduser(meta["repos_root"])):
+        if root.count(os.sep) - os.path.expanduser(meta["repos_root"]).count(os.sep) >= 3: dirs[:] = []
+        dirs[:] = [x for x in dirs if not x.startswith(".")]
+        if want in dirs and os.path.exists(os.path.join(root, want, ".git")): path = os.path.join(root, want); break
+if not path: sys.exit("no clone named %s under %s" % (want, meta["repos_root"]))
+name = os.path.basename(path.rstrip("/"))
+if any(r["name"] == name for r in meta["repos"]): sys.exit("%s is already in the task" % name)
+run("git", "-C", path, "fetch", "--quiet", "origin")
+base = next((b for b in ("main", "master") if run("git", "-C", path, "show-ref", "--verify", "--quiet", "refs/remotes/origin/" + b).returncode == 0), "main")
+wt = os.path.join(d, name)
+has = run("git", "-C", path, "show-ref", "--verify", "--quiet", "refs/heads/" + meta["branch"]).returncode == 0
+r = run("git", "-C", path, "worktree", "add", wt, meta["branch"]) if has else run("git", "-C", path, "worktree", "add", "--no-track", "-b", meta["branch"], wt, "origin/" + base)
+if r.returncode: sys.exit(r.stderr)
+url = run("git", "-C", path, "remote", "get-url", "origin").stdout.strip()
+import re
+m = re.match(r"^(?:\w+://)?(?:[^@/]+@)?([^/:]+)[:/](.+?)(?:\.git)?/?$", url)
+meta["repos"].append({"name": name, "main": path, "wt": wt, "base": base, "host": m.group(1) if m else None, "project": m.group(2) if m else None})
+json.dump(meta, open(os.path.join(d, "meta.json"), "w"), ensure_ascii=False, indent=2)
+print("added %s: %s, branch %s from origin/%s" % (name, wt, meta["branch"], base))
+EOF
+"""
+
+
+def task_md(m):
+    if m["repos"]:
+        repos = "\n".join("- `%s/`: ветка `%s` от `origin/%s`, MR в `%s` (%s)" % (r["name"], m["branch"], r["base"], r["base"], r["project"]) for r in m["repos"])
+    else:
+        repos = ("- пока не выбраны. Выбери по задаче и добавь каждый командой "
+                 "`%s/add-repo.sh <имя клона>`: она создаёт worktree ветки `%s` в папке задачи и записывает его в `meta.json`. "
+                 "Клоны лежат в `%s`." % (m["dir"], m["branch"], m["repos_root"]))
+    ctx = "\n".join("- `context/%s` → %s" % (c["link"], c["path"]) for c in m["context"]) or "- нет"
+    link = "\n\nYouTrack: %s" % m["url"] if m.get("url") else ""
+    yt = ""
+    if m.get("yt_files"):
+        yt += ("\n\n## Вложения из YouTrack (только читать)\n\nКартинки в описании и комментариях (`![](имя)`) это эти файлы; "
+               "смотри их, если они нужны для задачи.\n\n" + "\n".join(
+                   "- `context/youtrack/%s`: %s%s" % (f["file"], f["name"], " (%s)" % f["where"] if f.get("where") else "") for f in m["yt_files"]))
+    if m.get("yt_comments"):
+        yt += "\n\n## Комментарии из YouTrack\n\n" + "\n\n".join(
+            "### %s, %s\n\n%s" % (c["author"] or "—", c["when"], c["text"].strip() or "(пусто)") for c in m["yt_comments"])
+    # My prompt comes first when there is one; the issue's own description follows it.
+    task = ("## Задание\n\n%s\n\n## Описание из YouTrack\n\n%s" % (m["note"], m["desc"] or "(пусто)")) if m.get("note") else "## Задача\n\n%s" % (m["desc"] or "(описание не задано)")
+    return """# {key}: {title}
+
+{task}{link}{yt}
+
+## Репозитории (меняем)
+
+{repos}
+
+## Контекст (только читать)
+
+{ctx}
+
+## Команда
+
+Пресет `{preset}`. Роли и их адреса для `hc send` лежат в `team.json` рядом с этим файлом (поле `address`).
+Бриф каждой роли: `.agents/<роль>/BRIEF.md`.
+
+## Правила
+
+- Работай в папках репозиториев выше: это git worktree веток задачи. В `context/` ничего не меняй.
+- У каждого репозитория свой `AGENTS.md`: прочитай его перед изменениями.
+- Коммить в каждом репозитории отдельно, сообщения начинай с `[{key}]`.
+- Не пушь и не создавай MR: это делает человек кнопкой в панели задачи.
+- Если меняется контракт между сервисами (HTTP, очереди, БД), проверь потребителей в других репозиториях задачи и, если в задаче есть репозиторий документации, обнови её по его README.
+- Других агентов, кроме ролей из `team.json`, не запускай.
+
+## План и статус
+
+(ведёт исполнитель: план, решения, что сделано, как проверено; в конце строка «Статус: готово к MR»)
+""".format(key=m["key"], title=m["title"], task=task, link=link, yt=yt, repos=repos, ctx=ctx, preset=m["preset"])
+
+
+AGENTS_MD = """# {key}: задача
+
+Сначала прочитай `TASK.md`: там задача, репозитории, контекст, команда и правила.
+Репозитории задачи лежат в подпапках, у каждого свой `AGENTS.md`.
+"""
+
+
+def write(path, text):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as h:
+        h.write(text)
+
+
+def m_create(a):
+    """The task folder, its worktrees and files. Returns meta.json's content."""
+    d = expand(a["dir"])
+    if os.path.exists(d):
+        raise Fail("task %s already exists (%s)" % (a["key"], d))
+    os.makedirs(d)
+    repos = []
+    try:
+        for c in a["repos"]:
+            repos.append(add_worktree(c, d, a["branch"]))
+    except Exception:
+        for r in repos:
+            git(r["main"], "worktree", "remove", "--force", r["wt"])
+        shutil.rmtree(d, ignore_errors=True)
+        raise
+    used, ctx = set(), []
+    for p in a["context"]:
+        p = expand(p)
+        if not os.path.exists(p):
+            continue
+        link = "-".join([x for x in p.split("/") if x][-2:])
+        while link in used:
+            link += "_"
+        used.add(link)
+        ctx.append({"path": p, "link": link})
+    meta = {"key": a["key"], "title": a["title"], "desc": a["desc"], "url": a.get("url"), "branch": a["branch"],
+            "created": int(time.time() * 1000), "dir": d, "on": a.get("on"), "ns": a["ns"], "preset": a["preset"], "agents": a["agents"],
+            "repos_root": a["repos_root"], "repos": repos, "context": ctx, "yt_files": [], "yt_comments": a.get("yt_comments") or [],
+            "note": a.get("note") or ""}
+    os.makedirs(os.path.join(d, "context"))
+    for c in ctx:
+        os.symlink(c["path"], os.path.join(d, "context", c["link"]))
+    if a.get("yt_files"):
+        os.makedirs(os.path.join(d, "context", "youtrack"), exist_ok=True)
+        for f in a["yt_files"]:
+            if os.path.exists(f["path"]):
+                shutil.copy(f["path"], os.path.join(d, "context", "youtrack", os.path.basename(f["path"])))
+                meta["yt_files"].append({"file": os.path.basename(f["path"]), "name": f["name"], "where": f.get("where")})
+    write(os.path.join(d, "TASK.md"), task_md(meta))
+    write(os.path.join(d, "AGENTS.md"), AGENTS_MD.format(key=a["key"]))
+    os.symlink("AGENTS.md", os.path.join(d, "CLAUDE.md"))
+    write(os.path.join(d, "add-repo.sh"), ADD_REPO_SH)
+    os.chmod(os.path.join(d, "add-repo.sh"), 0o755)
+    write(os.path.join(d, "meta.json"), json.dumps(meta, ensure_ascii=False, indent=2))
+    # Redline lists tasks from ~/.herdr/tasks: a task kept elsewhere (inside its namespace) is linked there.
+    idx = os.path.join(HOME, ".herdr/tasks")
+    if os.path.dirname(d) != idx:
+        os.makedirs(idx, exist_ok=True)
+        if not os.path.lexists(os.path.join(idx, a["key"])):
+            os.symlink(d, os.path.join(idx, a["key"]))
+    return meta
+
+
+def m_briefs(a):
+    """Each role's folder (its agent's working folder; impl works in the task folder) and BRIEF.md."""
+    d = expand(a["dir"])
+    for role, text in a["briefs"].items():
+        write(os.path.join(d, ".agents", role, "BRIEF.md"), text)
+    return True
+
+
+def m_team(a):
+    """team.json: the roles (replaced on each launch) and the extra chats (kept, a new one added)."""
+    path = os.path.join(expand(a["dir"]), "team.json")
+    try:
+        with open(path) as h:
+            old = json.load(h)
+    except (OSError, ValueError):
+        old = {}
+    team = dict(a.get("team") or dict((k, v) for k, v in old.items() if k != "chats"))
+    team["chats"] = [c for c in old.get("chats", []) if not a.get("team")] + ([a["chat"]] if a.get("chat") else [])
+    write(path, json.dumps(team, ensure_ascii=False, indent=2))
+    return team
+
+
+CHAT_MD = """# {key}: чат по задаче
+
+Ты помогаешь по задаче {key} «{title}». Папка задачи: `{dir}`. Сначала прочитай `{dir}/TASK.md`: задача,
+репозитории (worktree в подпапках задачи), правила и раздел «План и статус», который ведёт исполнитель.
+Роли команды и их адреса для `hc send` в `{dir}/team.json`. Не пушь и не создавай MR.
+"""
+
+
+def m_chat_dir(a):
+    """A folder of its own for a new chat (.agents/chat-N), so continuing it finds its own conversation."""
+    d = expand(a["dir"])
+    n = 1
+    while os.path.exists(os.path.join(d, ".agents", "chat-%d" % n)):
+        n += 1
+    f = os.path.join(d, ".agents", "chat-%d" % n)
+    write(os.path.join(f, "AGENTS.md"), CHAT_MD.format(key=a["key"], title=a["title"], dir=d))
+    os.symlink("AGENTS.md", os.path.join(f, "CLAUDE.md"))
+    return {"folder": f, "name": "chat-%d" % n}
+
+
+def first_text(c):
+    if isinstance(c, str):
+        return c
+    for x in c if isinstance(c, list) else []:
+        if isinstance(x, dict) and x.get("type") in ("text", "input_text"):
+            return x.get("text", "")
+    return ""
+
+
+def m_sessions(a):
+    """Conversations of Codex and Claude started in the task folder or one of its .agents/<who> folders."""
+    d = expand(a["dir"])
+    folders = {d: "impl"}
+    try:
+        for n in sorted(os.listdir(os.path.join(d, ".agents"))):
+            if os.path.isdir(os.path.join(d, ".agents", n)):
+                folders[os.path.join(d, ".agents", n)] = n
+    except OSError:
+        pass
+    out = []
+    titles = {}
+    try:
+        with open(os.path.join(HOME, ".codex/session_index.jsonl"), errors="replace") as h:
+            for line in h:
+                try:
+                    o = json.loads(line)
+                    if o.get("thread_name"):
+                        titles[o.get("id")] = o["thread_name"]
+                except ValueError:
+                    pass
+    except OSError:
+        pass
+    import glob
+    files = sorted(glob.glob(os.path.join(HOME, ".codex/sessions/*/*/*/*.jsonl")), key=os.path.getmtime, reverse=True)
+    since = a.get("created", 0) / 1000.0 - 60
+    for f in files:
+        if os.path.getmtime(f) < since:
+            break
+        try:
+            with open(f, errors="replace") as h:
+                meta = json.loads(h.readline()).get("payload", {})
+                if meta.get("cwd") not in folders or meta.get("source") == "exec":
+                    continue
+                title = titles.get(meta.get("id"), "")
+                if not title:
+                    for line in h:
+                        o = json.loads(line)
+                        p = o.get("payload", {})
+                        if o.get("type") == "event_msg" and p.get("type") == "user_message":
+                            title = p.get("message", "")
+                            break
+            out.append({"agent": "codex", "id": meta.get("id"), "folder": meta["cwd"], "who": folders[meta["cwd"]],
+                        "at": os.path.getmtime(f), "started": os.path.getctime(f), "title": title.strip()[:140]})
+        except (OSError, ValueError):
+            pass
+    for folder, who in folders.items():
+        proj = os.path.join(HOME, ".claude/projects", re.sub(r"[^A-Za-z0-9]", "-", folder))
+        for f in glob.glob(os.path.join(proj, "*.jsonl")):
+            title, first = "", ""
+            try:
+                with open(f, errors="replace") as h:
+                    for line in h:
+                        o = json.loads(line)
+                        if o.get("type") in ("ai-title", "custom-title"):
+                            title = o.get("customTitle") or o.get("aiTitle") or title
+                        elif o.get("type") == "user" and not first and not o.get("isSidechain"):
+                            t = first_text((o.get("message") or {}).get("content"))
+                            if t and not t.lstrip().startswith("<"):
+                                first = t
+            except (OSError, ValueError):
+                continue
+            out.append({"agent": "claude", "id": os.path.basename(f)[:-6], "folder": folder, "who": who,
+                        "at": os.path.getmtime(f), "title": (title or first).strip()[:140]})
+    out.sort(key=lambda x: -x["at"])
+    # Live: the newest conversation in a folder whose team terminal (role or chat) still runs is that terminal's.
+    try:
+        with open(os.path.join(d, "team.json")) as h:
+            team = json.load(h)
+    except (OSError, ValueError):
+        team = {}
+    hc = shutil.which("hc") or os.path.join(HOME, ".local/bin/hc")
+    try:
+        ls = json.loads(subprocess.run([hc, "ls", "--json"], capture_output=True, text=True, timeout=20).stdout or "[]")
+        live = {t.get("address") for t in (ls.get("terminals", []) if isinstance(ls, dict) else ls)}
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        live = set()
+    entries = [dict(v, who=k) for k, v in team.items() if k != "chats" and isinstance(v, dict)] + team.get("chats", [])
+    for e in entries:
+        folder = e.get("folder") or (d if e.get("who") == "impl" else os.path.join(d, ".agents", e.get("who", "")))
+        if e.get("address") not in live:
+            continue
+        s = next((x for x in out if x["folder"] == folder and x["agent"] == e.get("agent")), None)
+        if s:
+            s.update(live=True, tab=e.get("tab"), address=e.get("address"))
+    return out
+
+
+# YouTrack: YOUTRACK_BASE_URL and YOUTRACK_TOKEN from an env file (youtrack.env in config.json, by default
+# youtrack-cli's ~/.config/youtrack-cli/.env). Read only: nothing here writes to it.
+YT_ENV = "~/.config/youtrack-cli/.env"
+
+
+def yt_env(a):
+    env, path = {}, expand(a.get("env") or YT_ENV)
+    try:
+        with open(path) as h:
+            for line in h:
+                if "=" in line and not line.lstrip().startswith("#"):
+                    k, v = line.split("=", 1)
+                    env[k.strip()] = v.strip().strip("'\"")
+    except OSError:
+        pass
+    if not (env.get("YOUTRACK_BASE_URL") and env.get("YOUTRACK_TOKEN")):
+        raise Fail("YouTrack: no YOUTRACK_BASE_URL and YOUTRACK_TOKEN in %s" % path)
+    return env
+
+
+def yt(env, path, params=None):
+    url = env["YOUTRACK_BASE_URL"].rstrip("/") + path + ("?" + urllib.parse.urlencode(params) if params else "")
+    req = urllib.request.Request(url, method="GET", headers={
+        "Authorization": "Bearer " + env["YOUTRACK_TOKEN"], "Accept": "application/json"})
+    with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req, timeout=30) as r:
+        raw = r.read().decode()
+        return json.loads(raw) if raw else {}
+
+
+CF = "customFields(name,value(name,login,fullName))"
+
+
+def fields(it):
+    """Custom fields as name -> text (or list of texts); users also give their logins."""
+    out, logins = {}, {}
+    for f in it.get("customFields") or []:
+        v, n = f.get("value"), f.get("name")
+        if isinstance(v, list):
+            out[n] = [x.get("fullName") or x.get("name") for x in v if isinstance(x, dict)]
+            logins[n] = [x.get("login") for x in v if isinstance(x, dict) and x.get("login")]
+        elif isinstance(v, dict):
+            out[n] = v.get("fullName") or v.get("name")
+            if v.get("login"):
+                logins[n] = [v["login"]]
+        else:
+            out[n] = v
+    return out, logins
+
+
+# The board's custom field names (youtrack.fields in config.json); these are YouTrack's defaults.
+YT_FIELDS = {"state": "State", "dev": "Assignee", "test": "", "priority": "Priority", "type": "Type", "stage": "", "products": ""}
+
+
+def issue_row(env, it, me, names=None):
+    f, lg = fields(it)
+    n = dict(YT_FIELDS, **(names or {}))
+    get = lambda k: f.get(n[k]) if n.get(k) else None
+    dev = get("dev")
+    products = get("products") or []
+    return {"key": it["idReadable"], "title": it.get("summary") or "", "state": get("state") or "",
+            "stage": get("stage") or "", "priority": get("priority") or "", "type": get("type") or "",
+            "dev": dev if isinstance(dev, list) else ([dev] if dev else []), "test": get("test") or "",
+            "products": products if isinstance(products, list) else [products],
+            "mine": me in (lg.get(n["dev"]) or []) + (lg.get("Assignee") or []),
+            "updated": it.get("updated"), "url": env["YOUTRACK_BASE_URL"].rstrip("/") + "/issue/" + it["idReadable"]}
+
+
+def m_yt_board(a):
+    env = yt_env(a)
+    me = yt(env, "/api/users/me", {"fields": "login,fullName"})
+    b = yt(env, "/api/agiles/" + a["board"], {"fields": "name,columnSettings(columns(presentation)),currentSprint(name,issues(idReadable,summary,updated,%s))" % CF})
+    sprint = b.get("currentSprint") or {}
+    return {"board": b.get("name"), "sprint": sprint.get("name"), "me": me.get("fullName") or me.get("login"),
+            "url": env["YOUTRACK_BASE_URL"].rstrip("/") + "/agiles/%s/current" % a["board"],
+            "columns": [c.get("presentation") for c in (b.get("columnSettings") or {}).get("columns") or []],
+            "issues": [issue_row(env, it, me.get("login"), a.get("fields")) for it in sprint.get("issues") or []]}
+
+
+ATT = "attachments(id,name,mimeType,size,url,created,comment(id))"
+
+
+def m_yt_issue(a):
+    env = yt_env(a)
+    me = yt(env, "/api/users/me", {"fields": "login"})
+    it = yt(env, "/api/issues/" + urllib.parse.quote(a["key"]), {"fields": "idReadable,summary,description,updated,%s,%s" % (CF, ATT)})
+    row = issue_row(env, it, me.get("login"), a.get("fields"))
+    row["desc"] = it.get("description") or ""
+    row["attachments"] = [{"id": x["id"], "name": x.get("name") or "", "mime": x.get("mimeType") or "", "size": x.get("size") or 0,
+                           "created": x.get("created"), "comment": (x.get("comment") or {}).get("id")} for x in it.get("attachments") or []]
+    comments = yt(env, "/api/issues/%s/comments" % urllib.parse.quote(a["key"]), {"fields": "id,text,created,updated,deleted,author(fullName,login)", "$top": 200})
+    row["comments"] = [{"id": c["id"], "text": c.get("text") or "", "created": c.get("created"),
+                        "author": (c.get("author") or {}).get("fullName") or (c.get("author") or {}).get("login") or ""}
+                       for c in comments if not c.get("deleted")]
+    return row
+
+
+def m_yt_files(a):
+    """The issue's attachments downloaded once into ~/.cache/herdr-task/yt/<KEY>/<id>-<name>; their paths."""
+    env = yt_env(a)
+    it = yt(env, "/api/issues/" + urllib.parse.quote(a["key"]), {"fields": ATT})
+    d = os.path.join(HOME, ".cache/herdr-task/yt", a["key"])
+    os.makedirs(d, exist_ok=True)
+    out = []
+    for x in it.get("attachments") or []:
+        name = re.sub(r"[/\\]", "_", x.get("name") or x["id"])
+        path = os.path.join(d, "%s-%s" % (x["id"], name))
+        if not os.path.exists(path) and x.get("url"):
+            url = x["url"] if x["url"].startswith("http") else env["YOUTRACK_BASE_URL"].rstrip("/") + x["url"]
+            req = urllib.request.Request(url, headers={"Authorization": "Bearer " + env["YOUTRACK_TOKEN"]})
+            with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req, timeout=60) as r, open(path + ".part", "wb") as h:
+                shutil.copyfileobj(r, h)
+            os.rename(path + ".part", path)
+        out.append({"id": x["id"], "name": x.get("name") or "", "mime": x.get("mimeType") or "", "size": x.get("size") or 0, "path": path})
+    return out
+
+
+MACHINE = {"home": m_home, "repos": m_repos, "tasks": m_tasks, "create": m_create, "briefs": m_briefs, "team": m_team,
+           "chat_dir": m_chat_dir, "sessions": m_sessions,
+           "yt_board": m_yt_board, "yt_issue": m_yt_issue, "yt_files": m_yt_files}
+
+
+# ---------- here, on the Mac: settings, the window, and calls to the machines ----------
+
+APP = os.environ.get("HERDR_APP_HOME", os.path.join(HOME, ".config/herdr-app"))
+MOD = os.path.join(APP, "mods/tasks")
+
+
+def tool(name):
+    return shutil.which(name) or os.path.join(HOME, ".local/bin", name)
+
+
+def config():
+    path = os.path.join(MOD, "config.json")
+    if not os.path.exists(path):
+        path = os.path.join(MOD, "config.example.json")
+    with open(path) as h:
+        return json.load(h)
+
+
+def youtrack(conf):
+    """The YouTrack board's namespace, its machine, and what the machine side needs (token file, field names)."""
+    yo = conf.get("youtrack") or {}
+    if not yo.get("ns") or not yo.get("board"):
+        raise Fail("YouTrack is off: set youtrack.ns and youtrack.board in mods/tasks/config.json")
+    ns = namespace(conf, yo["ns"])
+    return ns, {"board": yo["board"], "env": yo.get("env") or YT_ENV, "fields": yo.get("fields") or {}}
+
+
+def on_machine(on, fn, arg, timeout=600):
+    if not on:
+        return MACHINE[fn](arg)
+    with open(os.path.abspath(__file__)) as h:
+        src = h.read()
+    r = subprocess.run([tool("hc"), "exec", "--on", on, "-i", "python3", "-", "_m", fn, json.dumps(arg)],
+                       input=src, capture_output=True, text=True, timeout=timeout)
+    if r.returncode != 0:
+        raise Fail((r.stderr or r.stdout).strip().splitlines()[-1] if (r.stderr or r.stdout).strip() else "%s on %s failed" % (fn, on))
+    return json.loads(r.stdout)
+
+
+def app(cmd, **args):
+    r = subprocess.run([tool("herdr-app"), "do", cmd, json.dumps(args)], capture_output=True, text=True, timeout=60)
+    try:
+        out = json.loads(r.stdout or "{}")
+    except ValueError:
+        out = {"error": (r.stderr or r.stdout).strip()}
+    if r.returncode != 0 or (isinstance(out, dict) and out.get("error")):
+        raise Fail("%s: %s" % (cmd, out.get("error") if isinstance(out, dict) else r.stderr))
+    return out
+
+
+def window():
+    r = subprocess.run([tool("herdr-app"), "ls"], capture_output=True, text=True, timeout=30)
+    return json.loads(r.stdout or "{}").get("spaces", [])
+
+
+def namespace(conf, name):
+    ns = conf["namespaces"].get(name)
+    if not ns:
+        raise Fail("no namespace %r (have: %s)" % (name, ", ".join(conf["namespaces"])))
+    return dict(ns, id=name, on=ns.get("machine") or None)
+
+
+def ns_for(conf, machine, paths):
+    """The namespace of a machine (and of the repo paths given, when that machine has several)."""
+    cands = [n for n, x in conf["namespaces"].items() if (x.get("machine") or None) == (machine or None)]
+    for n in cands:
+        root = expand(conf["namespaces"][n]["repos"]).rstrip("/") + "/"
+        if any(p.startswith(root) for p in paths):
+            return n
+    if not cands:
+        raise Fail("no namespace on machine %r" % machine)
+    return cands[0]
+
+
+CYR = dict(zip("абвгдеёжзийклмнопрстуфхцчшщъыьэюя", "a b v g d e e zh z i y k l m n o p r s t u f h ts ch sh sch _ y _ e yu ya".split()))
+
+
+def slug(s):
+    s = "".join(CYR.get(ch, ch) for ch in s.lower()).replace("_", "")
+    return re.sub(r"-+", "-", re.sub(r"[^a-z0-9]+", "-", s)).strip("-")
+
+
+def branch_for(key, title):
+    tail = slug(title)[:48].rstrip("-") or "task"
+    return "%s/%s" % (key, tail)
+
+
+def guess_repos(text, clones, products, product_map):
+    """Repos the issue names: a clone's name in its text (or without -service), or by its Products field."""
+    low = (text or "").lower()
+    out = []
+    for c in clones:
+        n = c["name"].lower()
+        if len(n) < 6 and not re.search(r"[-_]", n):
+            continue  # short plain names (docs) are ordinary words in a description
+        words = [n] + ([n[:-8]] if n.endswith("-service") and len(n) - 8 >= 5 else [])
+        if any(re.search(r"(?<![a-z0-9_-])%s(?![a-z0-9_])" % re.escape(w), low) for w in words):
+            out.append(c["name"])
+    for p in products or []:
+        for n in product_map.get(p, []):
+            if n not in out and any(c["name"] == n for c in clones):
+                out.append(n)
+    return out
+
+
+def docs_context(ns, clones, picked):
+    """namespaces.<ns>.docs = {"clone": "docs", "always": ["01-overview"], "per_repo": "services/{repo}"}: paths in
+    that clone given to the agents to read when the task has repos (missing ones are skipped when the task is made)."""
+    d = ns.get("docs") or {}
+    root = next((c["path"] for c in clones if c["name"] == d.get("clone")), None)
+    if not root or not picked:
+        return []
+    out = [os.path.join(root, p) for p in d.get("always") or []]
+    if d.get("per_repo"):
+        out += [os.path.join(root, d["per_repo"].replace("{repo}", n)) for n in picked]
+    return out
+
+
+def role_spec(v):
+    """A role's agent: "claude", or {"agent": "codex", "model": "gpt-6.2-sol", "effort": "high"}."""
+    v = {"agent": v} if isinstance(v, str) else dict(v)
+    return {"agent": v["agent"], "model": v.get("model") or "", "effort": v.get("effort") or ""}
+
+
+def parse_team(text):
+    """--team impl=claude:opus,review=codex:gpt-6.2-sol:high (model and effort optional)."""
+    out = {}
+    for part in [x.strip() for x in (text or "").split(",") if x.strip()]:
+        role, _, rest = part.partition("=")
+        bits = rest.split(":")
+        if bits[0] not in ("claude", "codex"):
+            raise Fail("--team: %r: the agent is claude or codex" % part)
+        out[role.strip()] = {"agent": bits[0], "model": bits[1] if len(bits) > 1 else "", "effort": bits[2] if len(bits) > 2 else ""}
+    return out
+
+
+def agent_argv(ns, home, spec, resume):
+    agent, model, effort = spec["agent"], spec.get("model"), spec.get("effort")
+    w = ns["wrappers"][agent].replace("~", home, 1)
+    if agent == "claude":
+        return ([w, "--dangerously-skip-permissions"] + (["--model", model] if model else [])
+                + (["--effort", effort] if effort else []) + (["--continue"] if resume else []))
+    return ([w] + (["resume", "--last"] if resume else []) + ["--no-daemon", "--dangerously-bypass-approvals-and-sandbox"]
+            + (["-m", model] if model else []) + (["-c", "model_reasoning_effort=%s" % effort] if effort else []))
+
+
+def fill(text, values):
+    for k, v in values.items():
+        text = text.replace("{%s}" % k, v)
+    return text
+
+
+def briefs(conf, meta, roles):
+    p = conf["presets"][meta["preset"]]
+    values = {"key": meta["key"], "title": meta["title"], "dir": meta["dir"], "preset": meta["preset"]}
+    with open(os.path.join(MOD, "roles", p["flow"])) as h:
+        values["flow"] = fill(h.read().strip(), values)
+    out = {}
+    for role in roles:
+        with open(os.path.join(MOD, "roles", role + ".md")) as h:
+            out[role] = fill(h.read(), values)
+    return out
+
+
+ROLE_NAMES = {"impl": "исполнитель", "review": "ревьюер", "qa": "тестировщик"}
+
+
+def launch(conf, ns, meta, resume):
+    """The task's space: the impl tab (the agent below Redline's task panel), then a tab per other role."""
+    on = ns["on"]
+    home = on_machine(on, "home", {})
+    roles = conf["presets"][meta["preset"]]["roles"]
+    if not resume:
+        on_machine(on, "briefs", {"dir": meta["dir"], "briefs": briefs(conf, meta, roles)})
+    team = {}
+    space = None
+    agents = meta.get("agents") or {}
+    images = [os.path.join(meta["dir"], "context", "youtrack", f["file"]) for f in meta.get("yt_files") or [] if IMAGE.search(f["file"])]
+    for role in roles:
+        spec = role_spec(agents.get(role) or ns["roles"][role])
+        folder = meta["dir"] if role == "impl" else os.path.join(meta["dir"], ".agents", role)
+        first = None if resume else "Ты %s в задаче %s. Прочитай %s/.agents/%s/BRIEF.md и действуй по нему." % (ROLE_NAMES.get(role, role), meta["key"], meta["dir"], role)
+        argv = agent_argv(ns, home, spec, resume)
+        if first and images and spec["agent"] == "codex":
+            # Codex attaches -i images to its first prompt; given without one it sends them alone, so the brief goes along.
+            argv = argv + [x for p in images for x in ("-i", p)] + ["--", first + " Картинки задачи приложены."]
+            first = None
+        elif first and images:
+            first += " Картинки задачи, посмотри их: %s" % ", ".join('"%s"' % p for p in images)
+        args = {"folder": folder, "argv": argv}
+        if first:
+            args["task"] = first
+        if space is None:
+            r = app("space.new", name=("%s %s" % (meta["key"], meta["title"]))[:48], machine=on or "", tab=meta["key"], **args)
+            space = r["space"]
+        else:
+            r = app("tab.new", space=space, name=role, **args)
+        team[role] = {"address": r["terminal"].split("/")[-1], "agent": spec["agent"], "model": spec["model"], "tab": r["tab"], "folder": folder}
+    on_machine(on, "team", {"dir": meta["dir"], "team": team})
+    panel(meta, team["impl"]["tab"], on)
+    app("tab.select", id=team["impl"]["tab"])
+    return {"space": space, "team": team}
+
+
+def panel(meta, tab, on):
+    """Redline's task panel (repos, MRs) above the impl agent, as Redline's own tasks have it. Only with Redline
+    installed in mods/redline (it isn't part of this setup's public repo)."""
+    if not os.path.exists(os.path.join(APP, "mods/redline/task.js")):
+        return
+    def agent_pane():
+        for s in window():
+            for t in s.get("tabs", []):
+                if t["id"] == tab:
+                    return next((x["pane"] for x in t.get("terminals", []) if x.get("pane")), None)
+        return None
+    agent = None
+    for _ in range(50):
+        agent = agent_pane()
+        if agent:
+            break
+        time.sleep(0.1)
+    if not agent:
+        return
+    app("pane.split", pane=agent, direction="down", mod="redline", props={"task": {"dir": meta["dir"], "on": on, "tab": tab}})
+    # the panel opens below the agent: trade places so it sits on top. The split answers before the panel is
+    # there, and a swap with no neighbour yet also answers ok, so give it a moment (a miss only leaves it below).
+    time.sleep(1.5)
+    try:
+        app("pane.swap", pane=agent, direction="down")
+    except Fail:
+        pass
+
+
+def all_tasks(conf, only=None):
+    out = []
+    for n, x in conf["namespaces"].items():
+        if only and n != only:
+            continue
+        try:
+            for m in on_machine(x.get("machine") or None, "tasks", {"root": x["tasks"]}):
+                m["ns"] = m.get("ns") or n
+                out.append(m)
+        except Fail as e:
+            out.append({"ns": n, "error": str(e)})
+    spaces = window()
+    for m in out:
+        if "key" not in m:
+            continue
+        sp = task_space(spaces, m)
+        m["open"] = bool(sp)
+        m["space"] = sp["id"] if sp else None
+    return out
+
+
+def task_space(spaces, m):
+    for s in spaces:
+        if (s.get("machine") or None) == (m.get("on") or None) and (s.get("name") or "").split(" ")[0] == m["key"]:
+            return s
+    return None
+
+
+def point_images(text, files):
+    """![alt](name){attrs} -> ![alt](context/youtrack/<copied file>) for the attachments given (first match wins).
+    Names hold spaces and brackets, so each target is matched against the real names, the longest first."""
+    if not text or not files:
+        return text
+    names = sorted(set(f["name"] for f in files), key=len, reverse=True)
+    out, at = [], 0
+    for m in re.finditer(r"!\[([^\]]*)\]\(", text):
+        if m.start() < at:
+            continue
+        frm = m.end()
+        hit = None
+        for n in names:
+            for form in (n, urllib.parse.quote(n)):
+                if text.startswith(form + ")", frm):
+                    hit = (n, frm + len(form) + 1)
+                    break
+            if hit:
+                break
+        if not hit:
+            continue
+        end = hit[1]
+        attr = re.match(r"\{[^}]*\}", text[end:])
+        if attr:
+            end += attr.end()
+        f = next(f for f in files if f["name"] == hit[0])
+        out.append(text[at:m.start()] + "![%s](context/youtrack/%s)" % (m.group(1), os.path.basename(f["path"])))
+        at = end
+    return "".join(out) + text[at:]
+
+
+def cmd_start(conf, a):
+    ns_name = a.ns or ns_for(conf, a.machine, [p for p in (a.repos or "").split(",") if p.startswith("/")])
+    ns = namespace(conf, ns_name)
+    on = ns["on"]
+    preset = a.preset or conf.get("default_preset", "solo")
+    if preset not in conf["presets"]:
+        raise Fail("no preset %r (have: %s)" % (preset, ", ".join(conf["presets"])))
+    home = on_machine(on, "home", {})
+    key, title, desc, url, products = a.key, a.title, a.desc, None, []
+    yt_files, yt_comments = [], []
+    if a.desc_file:
+        with open(a.desc_file) as h:
+            desc = h.read()
+    if a.yt:
+        yns, yarg = youtrack(conf)
+        if yns["id"] != ns_name:
+            raise Fail("YouTrack issues go to the %s namespace" % yns["id"])
+        it = on_machine(on, "yt_issue", dict(yarg, key=a.yt))
+        key, title, url, products = it["key"], title or it["title"], it["url"], it["products"]
+        desc = desc or it["desc"]
+        stamp = lambda ms: time.strftime("%d.%m.%Y %H:%M", time.localtime(ms / 1000)) if ms else ""
+        by_comment = dict((c["id"], c) for c in it.get("comments", []))
+        # --attachments: the ids to give the agents (empty: none); without it, all of them
+        chosen = None if a.attachments is None else set(x.strip() for x in a.attachments.split(",") if x.strip())
+        if not a.no_attachments and it.get("attachments") and chosen != set():
+            where, comment_of = {}, {}
+            for x in it["attachments"]:
+                c = by_comment.get(x.get("comment"))
+                where[x["id"]] = "в комментарии %s, %s" % (c["author"], stamp(c.get("created"))) if c else ("в комментарии" if x.get("comment") else "")
+                comment_of[x["id"]] = x.get("comment")
+            yt_files = [dict(f, where=where.get(f["id"], ""), comment=comment_of.get(f["id"]))
+                        for f in on_machine(on, "yt_files", dict(yarg, key=key)) if chosen is None or f["id"] in chosen]
+        # The images in the text point at the copied files, in the place they stood in YouTrack.
+        desc = point_images(desc, [f for f in yt_files if not f.get("comment")] + yt_files)
+        if not a.no_comments:
+            yt_comments = [{"author": c["author"], "when": stamp(c.get("created")),
+                            "text": point_images(c["text"], [f for f in yt_files if f.get("comment") == c["id"]] + yt_files)}
+                           for c in it.get("comments", [])]
+    if not title:
+        raise Fail("a task needs a title (--title) or a YouTrack issue (--yt)")
+    key = key or "T-" + time.strftime("%m%d%H%M")
+    if not re.match(r"^[A-Za-z][\w-]*-\d+$", key):
+        raise Fail("task key looks like PROJ-123, got %r" % key)
+    clones = on_machine(on, "repos", {"root": ns["repos"]})
+    picked = []
+    for r in [x.strip() for x in (a.repos or "").split(",") if x.strip()]:
+        c = next((c for c in clones if c["path"] == r or c["name"] == r), None)
+        if not c and r.startswith("/"):
+            c = {"name": os.path.basename(r.rstrip("/")), "path": r}
+        if not c:
+            raise Fail("no clone %r under %s" % (r, ns["repos"]))
+        picked.append(c)
+    if not a.repos:
+        names = guess_repos("%s\n%s" % (title, desc or ""), clones, products, (conf.get("youtrack") or {}).get("products", {}))
+        picked = [c for c in clones if c["name"] in names]
+    # namespaces.<ns>.docs: read-only pages of a docs clone that go along with any picked repos
+    auto = docs_context(ns, clones, [c["name"] for c in picked])
+    context = list(dict.fromkeys(auto + [p.strip().replace("~", home, 1) for p in (a.context or "").split(",") if p.strip()]))
+    team = dict((r, role_spec(ns["roles"][r])) for r in conf["presets"][preset]["roles"])
+    for r, spec in parse_team(a.team).items():
+        if r not in team:
+            raise Fail("--team: preset %s has no role %r (has: %s)" % (preset, r, ", ".join(team)))
+        team[r] = spec
+    tasks_root = ns["tasks"].replace("~", home, 1)
+    meta = on_machine(on, "create", {
+        "dir": os.path.join(tasks_root, key), "key": key, "title": title, "desc": desc or "", "url": url,
+        "branch": branch_for(key, title), "repos": picked, "context": context,
+        "on": on, "ns": ns_name, "preset": preset, "agents": team, "repos_root": ns["repos"], "yt_files": yt_files, "yt_comments": yt_comments, "note": (a.note or "").strip()})
+    res = launch(conf, ns, meta, resume=False)
+    return {"key": key, "dir": meta["dir"], "branch": meta["branch"], "repos": [r["name"] for r in meta["repos"]],
+            "preset": preset, "agents": team, "space": res["space"], "team": res["team"]}
+
+
+def cmd_open(conf, a):
+    m = find_task(conf, a.key, a.ns)
+    if m["space"]:
+        app("space.select", id=m["space"])
+        return {"key": m["key"], "space": m["space"], "reopened": False}
+    ns = namespace(conf, m["ns"])
+    m.setdefault("preset", "solo")
+    res = launch(conf, ns, m, resume=True)
+    return {"key": m["key"], "space": res["space"], "reopened": True}
+
+
+def find_task(conf, key, ns=None):
+    tasks = [m for m in all_tasks(conf, ns) if m.get("key") == key]
+    if not tasks:
+        raise Fail("no task %s" % key)
+    return tasks[0]
+
+
+def cmd_sessions(conf, a):
+    m = find_task(conf, a.key, a.ns)
+    return on_machine(m.get("on"), "sessions", {"dir": m["dir"], "created": m.get("created", 0)})
+
+
+def cmd_chat(conf, a):
+    """A chat tab in the task's space: a new conversation in a folder of its own, or one continued in its folder."""
+    m = find_task(conf, a.key, a.ns)
+    ns = namespace(conf, m["ns"])
+    on = ns["on"]
+    space = m["space"]
+    if not space:
+        space = launch(conf, ns, dict(m, preset=m.get("preset") or "solo"), resume=True)["space"]
+    home = on_machine(on, "home", {})
+    spec = {"agent": a.agent, "model": a.model or "", "effort": ""}
+    w = ns["wrappers"][a.agent].replace("~", home, 1)
+    if a.resume:
+        folder, name = a.folder or m["dir"], (a.name or "chat")[:24]
+        if a.agent == "claude":
+            argv = [w, "--dangerously-skip-permissions", "--resume", a.resume] + (["--model", a.model] if a.model else [])
+        else:
+            argv = [w, "resume", a.resume, "--no-daemon", "--dangerously-bypass-approvals-and-sandbox"] + (["-m", a.model] if a.model else [])
+        first = None
+    else:
+        made = on_machine(on, "chat_dir", {"dir": m["dir"], "key": m["key"], "title": m["title"]})
+        folder, name = made["folder"], a.name or made["name"]
+        argv = agent_argv(ns, home, spec, False)
+        first = a.message or None
+    args = {"space": space, "name": name, "folder": folder, "argv": argv}
+    if first:
+        args["task"] = first
+    r = app("tab.new", **args)
+    if not a.resume:
+        on_machine(on, "team", {"dir": m["dir"], "chat": {"who": name, "address": r["terminal"].split("/")[-1], "agent": a.agent,
+                                                         "model": a.model or "", "tab": r["tab"], "folder": folder}})
+    app("tab.select", id=r["tab"])
+    return {"key": m["key"], "space": space, "tab": r["tab"], "folder": folder}
+
+
+def cmd_board(conf, a):
+    ns, yarg = youtrack(conf)
+    b = on_machine(ns["on"], "yt_board", yarg)
+    local = {m["key"]: m for m in all_tasks(conf, ns["id"]) if "key" in m}
+    for it in b["issues"]:
+        m = local.get(it["key"])
+        it["task"] = {"open": m["open"], "preset": m.get("preset"), "repos": [r["name"] for r in m["repos"]]} if m else None
+    return b
+
+
+def cmd_issue(conf, a):
+    ns, yarg = youtrack(conf)
+    it = on_machine(ns["on"], "yt_issue", dict(yarg, key=a.key))
+    clones = on_machine(ns["on"], "repos", {"root": ns["repos"]})
+    it["guess"] = guess_repos("%s\n%s" % (it["title"], it["desc"]), clones, it["products"], conf["youtrack"].get("products", {}))
+    return it
+
+
+IMAGE = re.compile(r"\.(png|jpe?g|gif|webp|bmp|tiff?|heic|ico)$", re.I)
+
+
+def cmd_files(conf, a):
+    """Attachments of an issue here on the Mac (copied from the YouTrack machine once), images also as PNG
+    with their size for the window (paths relative to the app home, as Herdr's image() wants them)."""
+    ns, yarg = youtrack(conf)
+    on = ns["on"]
+    files = on_machine(on, "yt_files", dict(yarg, key=a.key))
+    d = os.path.join(MOD, ".cache/yt", a.key)
+    os.makedirs(d, exist_ok=True)
+    for f in files:
+        local = os.path.join(d, os.path.basename(f["path"]))
+        if not os.path.exists(local):
+            if on:
+                r = subprocess.run(["scp", "-q", "%s:%s" % (on, f["path"]), local + ".part"], capture_output=True, text=True, timeout=300)
+                if r.returncode != 0:
+                    f["error"] = (r.stderr or "scp failed").strip()
+                    continue
+                os.rename(local + ".part", local)
+            else:
+                shutil.copy(f["path"], local)
+        f["local"] = local
+        if IMAGE.search(f["name"]) or f["mime"].startswith("image/"):
+            png = re.sub(r"\.[^./]*$", "", local) + ".view.png"
+            if not os.path.exists(png):
+                subprocess.run(["sips", "-s", "format", "png", local, "--out", png], capture_output=True, timeout=60)
+            if os.path.exists(png):
+                dims = subprocess.run(["sips", "-g", "pixelWidth", "-g", "pixelHeight", png], capture_output=True, text=True, timeout=30).stdout
+                w = re.search(r"pixelWidth: (\d+)", dims)
+                h = re.search(r"pixelHeight: (\d+)", dims)
+                f.update(png=os.path.relpath(png, APP), w=int(w.group(1)) if w else 0, h=int(h.group(1)) if h else 0)
+    return files
+
+
+def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "_m":
+        try:
+            print(json.dumps(MACHINE[sys.argv[2]](json.loads(sys.argv[3])), ensure_ascii=False))
+        except Exception as e:
+            sys.stderr.write("%s\n" % e)
+            sys.exit(1)
+        return
+    import argparse
+    ap = argparse.ArgumentParser(prog="herdr-task", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    s = sub.add_parser("start")
+    s.add_argument("--ns")
+    s.add_argument("--machine", default="", help="with no --ns: the namespace of this machine (and of the repo paths)")
+    s.add_argument("--yt", help="a YouTrack issue key: title and description come from it")
+    s.add_argument("--key")
+    s.add_argument("--title")
+    s.add_argument("--desc")
+    s.add_argument("--desc-file")
+    s.add_argument("--repos", help="clone names or full paths, comma-separated (none: guessed, or the agent picks)")
+    s.add_argument("--context", help="read-only paths, comma-separated")
+    s.add_argument("--preset")
+    s.add_argument("--no-attachments", action="store_true", help="with --yt: don't copy the issue's attachments into context/youtrack/")
+    s.add_argument("--attachments", help="with --yt: only these attachment ids (comma-separated; empty: none)")
+    s.add_argument("--no-comments", action="store_true", help="with --yt: don't put the issue's comments into TASK.md")
+    s.add_argument("--note", help="my prompt: TASK.md's first section «Задание», above YouTrack's description")
+    s.add_argument("--team", help="agent and model per role: impl=claude:opus,review=codex:gpt-6.2-sol[:effort]")
+    o = sub.add_parser("open")
+    o.add_argument("key")
+    o.add_argument("--ns")
+    se = sub.add_parser("sessions")
+    se.add_argument("key")
+    se.add_argument("--ns")
+    c = sub.add_parser("chat")
+    c.add_argument("key")
+    c.add_argument("--ns")
+    c.add_argument("--agent", choices=["claude", "codex"], default="claude")
+    c.add_argument("--model")
+    c.add_argument("--message", help="the new chat's first message")
+    c.add_argument("--name", help="the tab's name")
+    c.add_argument("--resume", help="a session id to continue")
+    c.add_argument("--folder", help="the folder the continued session ran in")
+    l = sub.add_parser("ls")
+    l.add_argument("--ns")
+    sub.add_parser("board")
+    i = sub.add_parser("issue")
+    i.add_argument("key")
+    r = sub.add_parser("repos")
+    r.add_argument("--ns", required=True)
+    fi = sub.add_parser("files")
+    fi.add_argument("key")
+    sub.add_parser("presets")
+    a = ap.parse_args()
+    try:
+        conf = config()
+        if a.cmd == "start":
+            out = cmd_start(conf, a)
+        elif a.cmd == "open":
+            out = cmd_open(conf, a)
+        elif a.cmd == "sessions":
+            out = cmd_sessions(conf, a)
+        elif a.cmd == "chat":
+            out = cmd_chat(conf, a)
+        elif a.cmd == "ls":
+            out = all_tasks(conf, a.ns)
+        elif a.cmd == "board":
+            out = cmd_board(conf, a)
+        elif a.cmd == "files":
+            out = cmd_files(conf, a)
+        elif a.cmd == "issue":
+            out = cmd_issue(conf, a)
+        elif a.cmd == "repos":
+            ns = namespace(conf, a.ns)
+            out = on_machine(ns["on"], "repos", {"root": ns["repos"]})
+        elif a.cmd == "presets":
+            yo = conf.get("youtrack") or {}
+            out = {"default": conf.get("default_preset", "solo"), "presets": conf["presets"], "models": conf.get("models", {}),
+                   "youtrack": {"ns": yo.get("ns"), "done": yo.get("done") or []} if yo.get("ns") and yo.get("board") else None,
+                   "open_with": conf.get("open_with") or [],
+                   "namespaces": {n: {"label": x.get("label", n), "machine": x.get("machine") or None, "docs": bool((x.get("docs") or {}).get("clone")),
+                                      "roles": dict((r, role_spec(v)) for r, v in x["roles"].items())} for n, x in conf["namespaces"].items()}}
+    except (Fail, subprocess.TimeoutExpired, OSError, ValueError, KeyError) as e:
+        sys.stderr.write("herdr-task: %s\n" % (e,))
+        sys.exit(1)
+    print(json.dumps(out, ensure_ascii=False, indent=2))
+
+
+if __name__ == "__main__":
+    main()

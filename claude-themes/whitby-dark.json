@@ -1,0 +1,12 @@
+{
+  "name": "Whitby Dark",
+  "base": "dark-ansi",
+  "overrides": {
+    "userMessageBackground": "#363c46",
+    "userMessageBackgroundHover": "#454a56",
+    "bashMessageBackgroundColor": "#363c46",
+    "memoryBackgroundColor": "#363c46",
+    "selectionBg": "#375b93",
+    "composerSidebarBackground": "#2f343e"
+  }
+}
