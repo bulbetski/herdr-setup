@@ -62,6 +62,7 @@ git checkout -t origin/main
 | `usage-limits` | [nozikov/herdr-usage-limits](https://github.com/nozikov/herdr-usage-limits), без правок | Лимиты Claude и Codex |
 | `auto-title` | [kryptamine/herdr-auto-title](https://github.com/kryptamine/herdr-auto-title), без правок | Называет вкладки по тому, что в них происходит; свой сервис ставится из его окна |
 | `tabs-plus` | клон встроенного `tabs` | Кнопки Explorer, Tasks, MRs, Worklog; спрятанные вкладки не показываются |
+| `new-menu-plus` | клон встроенного `new-menu` | Меню «+» без встроенных Claude Code и Codex: остаются свои обёртки из `programs.json` |
 | `workspace-status-plus` | клон встроенного `workspace-status` | Состояние связи с машиной спейса и ↻ Reconnect |
 | `conn-details` | свой | Полный текст последней ошибки связи: Copy, ↻ Reconnect |
 | `tasks` | свой | Задачи для команды агентов, доска YouTrack |
@@ -181,7 +182,7 @@ YouTrack включается секцией `youtrack`:
 Моё в этом репозитории под MIT, см. `LICENSE`. У взятого чужого своя лицензия, текст лежит рядом:
 
 - `file-preview`, `file-preview-panel`, `space-folders`, `herdr-md`, `usage-limits`, `auto-title`: MIT, `LICENSE` в папке мода, с копирайтом автора.
-- `tabs-plus`, `workspace-status-plus`: клоны модов Herdr, Apache-2.0, `LICENSE` в папке мода, в начале `main.js` отмечено, что файл изменён.
+- `tabs-plus`, `new-menu-plus`, `workspace-status-plus`: клоны модов Herdr, Apache-2.0, `LICENSE` в папке мода, в начале `main.js` отмечено, что файл изменён.
 - Темы Whitby (`themes/whitby-*.json`, `claude-themes/whitby-*.json`): MPL-2.0, `LICENSE-whitby` рядом.
 - `herdr-md/marked.js`: библиотека marked, её лицензия в `marked.LICENSE.md`.
 

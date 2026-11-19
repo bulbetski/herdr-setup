@@ -131,7 +131,7 @@ export default class Tabs extends View {
       .child(h_flex().id("tab-scroll").flex_1().min_w(0).h_full().items_center().gap(3).overflow_x_scrollbar().track_scroll(this.scroll)
         .on_size_change((_size, cx) => { if (active >= 0) { this.scroll.scroll_to_item(active); cx.notify(); } })
         .children(shown.map(item)))
-      .child(button("tab-new", "+", () => openOverlay({ mod: "new-menu", kind: "popup", width: 250, height: 512 })))
+      .child(button("tab-new", "+", () => openOverlay({ mod: "new-menu-plus", kind: "popup", width: 250, height: 512 })))
       // Files and Changes (gitview) are gone: the Explorer column has the tree, history and changes.
       .when(Boolean(explorer), el => el.child(h_flex().id("toggle-explorer").h(26).px(8).gap(5).flex_none().items_center().rounded(6)
         .text_size(12).bg(explorerOn ? t.selected : t.chrome).text_color(explorerOn ? t.foreground : t.muted).tooltip(explorerTip(w?.platform === "macos"))
