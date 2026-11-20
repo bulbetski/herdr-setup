@@ -293,7 +293,7 @@ export default class FilePreview extends View {
     this.changeScroll = VirtualListScrollHandle.new();
     this.changeCursor = null;   // keyboard row of the Changes tab ("<section>:<rel path>")
     this.atCommit = null;   // a file shown as of a commit: { hash, short, subject, path, kept }
-    this.findScroll = VirtualListScrollHandle.new();
+    this.findScroll = ScrollHandle.new();   // the search results, a plain list (at most MAX_RESULTS rows)
     this.ts = null;         // file search of the tree: { input, query, results, total, at, ... }
     this.ds = null;         // search in the shown document: { input, query, hits, total, blocks, at, heads }
     this.inInput = false;   // the key on its way up came from a search field
@@ -718,7 +718,10 @@ export default class FilePreview extends View {
     else this.expand(rel, cx);
   }
 
-  /** Opens a file by path (relative to the root, or absolute inside it), expanding its folders. */
+  /**
+   * Opens a file by path (relative to the root, or absolute inside it), expanding its folders.
+   * opts.open: a folder, expanded itself too.
+   */
   reveal(path, cx, opts = {}) {
     const root = this.tree.root;
     // Normalized, so "a/../b" never expands (or remembers) a folder named "a/..".
@@ -727,7 +730,7 @@ export default class FilePreview extends View {
     const ctx = this.ctx, tree = this.tree;
     cx.spawn(async (cx) => {
       const parts = rel.split("/");
-      for (let i = 1; i < parts.length; i++) {
+      for (let i = 1; i < parts.length + (opts.open ? 1 : 0); i++) {
         const folder = parts.slice(0, i).join("/");
         tree.expanded.add(folder);
         if (!tree.entries.has(folder)) await tree.load(folder, this.alive(ctx)).catch(() => {});
@@ -1115,7 +1118,7 @@ export default class FilePreview extends View {
     if (!this.tree.root) return;
     this.focusTree(true);
     if (!this.ts) {
-      const input = InputState.new({ placeholder: "Find a file…" });
+      const input = InputState.new({ placeholder: "Find a file or folder…" });
       const ts = this.ts = { input, query: "", results: [], total: 0, at: 0, pool: null, poolQ: null, poolData: null, opened: null };
       input.on("change", (_e, cx) => { if (this.ts === ts && input.value() !== ts.query) this.treeQuery(input.value(), cx); });
       input.on("submit", (_e, cx) => { if (this.ts === ts) { this.treePick(cx); cx.notify(); } });
@@ -1191,10 +1194,11 @@ export default class FilePreview extends View {
     this.findScroll.scroll_to_item(ts.at);
   }
 
-  /** Enter on a result: opens it; the field keeps the keyboard. */
+  /** Enter on a result: opens a file (the field keeps the keyboard); a folder, in the tree. */
   treePick(cx) {
     const r = this.ts?.results[this.ts.at];
     if (!r) return;
+    if (r.dir) { this.closeTreeFind(cx, false); this.reveal(r.path, cx, { treeOnly: true, open: true }); return; }
     this.ts.opened = r.path;
     this.cursor = r.path;
     this.show(r.path, cx);
@@ -1203,12 +1207,12 @@ export default class FilePreview extends View {
 
   findClick(path, cx) {
     const ts = this.ts;
-    if (!ts) return;
+    if (!ts || Date.now() - this.dropped < 400) return;   // a press that ended a drag
     const i = ts.results.findIndex((r) => r.path === path);
     if (i < 0) return;
     ts.at = i;
     this.treePick(cx);
-    ts.input.focus();
+    if (this.ts === ts) ts.input.focus();
     cx.notify();
   }
 
@@ -1669,7 +1673,7 @@ export default class FilePreview extends View {
     this.cursor = rel || this.cursor;
     const local = !this.ctx.on, paste = [["Paste", "paste", "⌘V"]];
     const last = this.undo[this.undo.length - 1], undo = last ? [[`Undo ${last.label}`, "undo", "⌘Z"], "-"] : [];
-    const paths = [["Copy path", "copypath"], ["Copy relative path", "copyrel"], ["Insert path into terminal", "insert"],
+    const paths = [["Open in terminal", "terminal"], ["Copy path", "copypath"], ["Copy relative path", "copyrel"], ["Insert path into terminal", "insert"],
       ...(local ? [["Reveal in Finder", "reveal"]] : [])];
     let items;
     if (rel === "") items = [...undo, ["New file…", "newfile"], ["New folder…", "newdir"], ...paste, "-", ...paths];
@@ -1717,6 +1721,7 @@ export default class FilePreview extends View {
       case "copypath": cx.write_to_clipboard(abs); this.say(`Copied the path ${tilde(abs)}`); break;
       case "copyrel": cx.write_to_clipboard(rel || "."); this.say(`Copied the path ${rel || "."}`); break;
       case "insert": this.insertPath(abs, cx); break;
+      case "terminal": this.openTerminal(this.tree.abs(folder)); break;
       case "reveal": exec("open", ["-R", abs]).catch(() => {}); break;
     }
     cx.notify();
@@ -1738,6 +1743,14 @@ export default class FilePreview extends View {
     cx?.spawn(async () => {
       clip.pb = mode === "copy" && !clip.on ? await ops.pbWriteFiles([clip.abs]) : (await ops.pbRead())?.n ?? null;
     });
+  }
+
+  /** A new terminal tab of the active space in that folder (of a file: its folder). */
+  openTerminal(abs) {
+    const space = spaces().find((s) => s.active), on = this.ctx.on ?? null;
+    // A space's tabs start on its machine: the folder has to be there.
+    if (!space || (space.machine ?? null) !== on) { this.say(`The active space isn't on ${on ?? "this computer"}`, "error"); return; }
+    run("tab.new", { space: space.id, folder: abs });
   }
 
   /** The path into the space's terminal (the shown tab's, else the space's first), as a paste. */
@@ -2706,15 +2719,14 @@ export default class FilePreview extends View {
     const ts = this.ts, f = this.ctx?.files, list = ts.results;
     let foot;
     if (!f?.data) foot = f?.error ? `Cannot list the files: ${f.error}` : "Listing files…";
-    else if (!list.length) foot = "No matching files";
+    else if (!list.length) foot = "Nothing matches";
     else foot = (ts.total > list.length ? `Best ${list.length} of ${ts.total.toLocaleString("en-US")} matches` : matches(ts.total))
-      + ` · ${f.data.paths.length.toLocaleString("en-US")}${f.data.truncated ? "+" : ""} files`;
+      + ` · ${f.data.files.toLocaleString("en-US")}${f.data.truncated ? "+" : ""} files`;
+    // A plain list (MAX_RESULTS rows at most), so its rows take the tree's mouse handlers: click,
+    // right click (the menu) and drag onto a folder.
     return v_flex().flex_1().min_h(0)
-      .when(list.length > 0, (el) => el.child(div().flex_1().min_h(0).relative().py(4)
-        .child(v_virtual_list("fp-find-list", list.length, ROW, (i) => "find:" + list[i].path,
-          (range) => list.slice(range.start, range.end).map((r, k) => this.resultRow(r, range.start + k === ts.at, t)))
-          .track_scroll(this.findScroll).on_item_click((key, cx) => this.findClick(key.slice(5), cx)).size_full())
-        .child(Scrollbar.vertical("fp-find-list").viewport_from_layout().absolute().inset_0())))
+      .when(list.length > 0, (el) => el.child(v_flex().id("fp-find-list").flex_1().min_h(0).py(4)
+        .overflow_y_scrollbar().track_scroll(this.findScroll).children(list.map((r, i) => this.resultRow(r, i === ts.at, t)))))
       .when(!list.length, (el) => el.child(div().flex_1()))
       .child(div().flex_none().px(10).py(4).border_t(1).border_color(t.border).text_size(11)
         .text_color(f?.error ? t.ansi3 : t.dim).child(foot));
@@ -2732,13 +2744,20 @@ export default class FilePreview extends View {
       spans.push(on ? piece.text_color(t.accent).font_bold() : piece);
       i = j;
     }
-    const md = lang.isMarkdown(name), code = lang.forPath(name);
-    const g = this.git?.files.get(r.path), tint = g ? gitColor(g, t) : null;
-    return h_flex().h(ROW).w_full().pl(8).pr(8).gap(5).items_center().when(sel, (el) => el.bg(t.selected))
-      .child(svg(ICON + (md ? "file-md.svg" : code ? "file-code.svg" : "file.svg")).size(14).flex_none().text_color(md ? t.accent : t.dim))
+    const md = !r.dir && lang.isMarkdown(name), code = !r.dir && lang.forPath(name);
+    const g = this.git ? (r.dir ? this.git.folders : this.git.files).get(r.path) : undefined, tint = g ? gitColor(g, t) : null;
+    const icon = r.dir ? "folder.svg" : md ? "file-md.svg" : code ? "file-code.svg" : "file.svg";
+    const dropHere = Boolean(this.drag && r.dir && this.drag.over === r.path && this.drag.src !== r.path);
+    const el = h_flex().id(`fp-find:${r.path}`).h(ROW).w_full().flex_none().pl(8).pr(8).gap(5).items_center()
+      .when(sel || dropHere, (el) => el.bg(dropHere ? t.selection : t.selected))
+      .when(Boolean(this.drag && this.drag.src === r.path), (el) => el.opacity(0.5))
+      .child(svg(ICON + icon).size(14).flex_none().text_color(md ? t.accent : r.dir ? t.muted : t.dim))
       .child(h_flex().flex_none().max_w("70%").overflow_hidden().text_color(r.path === this.file ? t.accent : tint ?? t.foreground).children(spans))
       .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(dir))
-      .when(Boolean(tint), (el) => el.child(div().w(12).flex_none().text_center().text_size(11).font_medium().text_color(tint).child(g)));
+      .when(Boolean(tint) && !r.dir, (el) => el.child(div().w(12).flex_none().text_center().text_size(11).font_medium().text_color(tint).child(g)))
+      .when(Boolean(tint) && r.dir, (el) => el.child(h_flex().w(12).flex_none().justify_center().child(div().size(5).rounded_full().bg(tint))))
+      .on_click((_e, cx) => this.findClick(r.path, cx));
+    return this.rowDrag(el, r);
   }
 
   /** The sidebar: Files | Commits tabs (in a repo) over the tree or the history. */

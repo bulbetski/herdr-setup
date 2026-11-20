@@ -16,7 +16,11 @@ const LIST = 'cd "$1" 2>/dev/null || exit 2; ' +
   'printf "git\\0"; git --no-optional-locks -c core.fsmonitor=false -c core.quotepath=off ls-files --cached --others --exclude-standard -z 2>/dev/null | head -c ' + BYTES + '; exit 0; fi; ' +
   'printf "find\\0"; find . -maxdepth ' + DEPTH + ' -name .git -prune -o \\( -type f -o -type l \\) -print 2>/dev/null | head -n ' + MAX_FIND + ' | tr "\\n" "\\0"; exit 0';
 
-/** -> { paths, lower, base, source: "git" | "find", truncated }; rejects when it can't run. */
+/**
+ * -> { paths, lower, base, dir, files, source: "git" | "find", truncated }; rejects when it can't
+ * run. The folders come from the files' paths (dir[i] marks them; files counts the rest), so a
+ * folder with nothing listed in it isn't there.
+ */
 export async function listFiles(root, on) {
   const r = await exec("sh", ["-c", LIST, "fp", root], { on });
   if (r.code !== 0) throw new Error((r.stderr || "Cannot list the files").trim());
@@ -33,8 +37,18 @@ export async function listFiles(root, on) {
     if (paths.length >= max) { truncated = true; break; }
     paths.push(p);
   }
+  const files = paths.length, dirs = new Set();
+  for (let i = 0; i < files; i++) {
+    for (let p = paths[i], cut = p.lastIndexOf("/"); cut > 0; cut = p.lastIndexOf("/", cut - 1)) {
+      const d = p.slice(0, cut);
+      if (dirs.has(d)) break;              // its parents are in too
+      dirs.add(d);
+    }
+  }
+  for (const d of dirs) if (!seen.has(d)) paths.push(d);
   paths.sort();
-  return { paths, lower: paths.map((p) => p.toLowerCase()), base: paths.map((p) => p.lastIndexOf("/") + 1), source, truncated };
+  const dir = paths.map((p) => dirs.has(p) && !seen.has(p));
+  return { paths, lower: paths.map((p) => p.toLowerCase()), base: paths.map((p) => p.lastIndexOf("/") + 1), dir, files, source, truncated };
 }
 
 const BOUNDARY = "/-_. ";
@@ -123,7 +137,7 @@ export function fuzzy(q, s, b) {
 
 /**
  * Ranks `files` for `query`. `pool`: indices to look in (a previous query's matches, when
- * this one extends it). -> { results: [{ path, hits }], pool, total }
+ * this one extends it). -> { results: [{ path, dir, hits }], pool, total }
  */
 export function rank(files, query, pool = null) {
   const q = query.toLowerCase().replace(/\s+/g, "");
@@ -136,7 +150,7 @@ export function rank(files, query, pool = null) {
   }
   found.sort((a, b) => b.score - a.score || files.paths[a.i].length - files.paths[b.i].length || (files.paths[a.i] < files.paths[b.i] ? -1 : 1));
   return {
-    results: found.slice(0, MAX_RESULTS).map((f) => ({ path: files.paths[f.i], hits: f.hits })),
+    results: found.slice(0, MAX_RESULTS).map((f) => ({ path: files.paths[f.i], dir: files.dir[f.i], hits: f.hits })),
     pool: found.map((f) => f.i).sort((a, b) => a - b),
     total: found.length,
   };
