@@ -9,6 +9,8 @@ agents talk to each other with `hc send`; their addresses are in team.json.
   herdr-task start --ns work --yt PROJ-123 [--preset pair] [--repos a,b] [--context p1,p2]
   herdr-task start --ns personal --title "..." --desc "..." --repos a,b --team impl=claude:opus,review=claude:sonnet
   herdr-task open KEY            show its space, or open it again with the agents continuing
+  herdr-task edit KEY [--add-repo X] [--rm-repo X [--force]] [--add-context P] [--rm-context P]   change what the task
+                                 works on; TASK.md's lists follow and the agents are told
   herdr-task sessions KEY        the agents' conversations in the task, newest first (live ones: in which tab)
   herdr-task chat KEY --agent claude [--model opus] [--message "..."]   a new chat tab in the task's space
   herdr-task chat KEY --resume <session id> --agent codex --folder <its folder>   continue a conversation there
@@ -175,14 +177,20 @@ EOF
 """
 
 
-def task_md(m):
+def repos_md(m):
     if m["repos"]:
-        repos = "\n".join("- `%s/`: ветка `%s` от `origin/%s`, MR в `%s` (%s)" % (r["name"], m["branch"], r["base"], r["base"], r["project"]) for r in m["repos"])
-    else:
-        repos = ("- пока не выбраны. Выбери по задаче и добавь каждый командой "
-                 "`%s/add-repo.sh <имя клона>`: она создаёт worktree ветки `%s` в папке задачи и записывает его в `meta.json`. "
-                 "Клоны лежат в `%s`." % (m["dir"], m["branch"], m["repos_root"]))
-    ctx = "\n".join("- `context/%s` → %s" % (c["link"], c["path"]) for c in m["context"]) or "- нет"
+        return "\n".join("- `%s/`: ветка `%s` от `origin/%s`, MR в `%s` (%s)" % (r["name"], m["branch"], r["base"], r["base"], r["project"]) for r in m["repos"])
+    return ("- пока не выбраны. Выбери по задаче и добавь каждый командой "
+            "`%s/add-repo.sh <имя клона>`: она создаёт worktree ветки `%s` в папке задачи и записывает его в `meta.json`. "
+            "Клоны лежат в `%s`." % (m["dir"], m["branch"], m["repos_root"]))
+
+
+def ctx_md(m):
+    return "\n".join("- `context/%s` → %s" % (c["link"], c["path"]) for c in m["context"]) or "- нет"
+
+
+def task_md(m):
+    repos, ctx = repos_md(m), ctx_md(m)
     link = "\n\nYouTrack: %s" % m["url"] if m.get("url") else ""
     yt = ""
     if m.get("yt_files"):
@@ -259,11 +267,7 @@ def m_create(a):
         p = expand(p)
         if not os.path.exists(p):
             continue
-        link = "-".join([x for x in p.split("/") if x][-2:])
-        while link in used:
-            link += "_"
-        used.add(link)
-        ctx.append({"path": p, "link": link})
+        ctx.append({"path": p, "link": ctx_link(p, used)})
     meta = {"key": a["key"], "title": a["title"], "desc": a["desc"], "url": a.get("url"), "branch": a["branch"],
             "created": int(time.time() * 1000), "dir": d, "on": a.get("on"), "ns": a["ns"], "preset": a["preset"], "agents": a["agents"],
             "repos_root": a["repos_root"], "repos": repos, "context": ctx, "yt_files": [], "yt_comments": a.get("yt_comments") or [],
@@ -290,6 +294,70 @@ def m_create(a):
         if not os.path.lexists(os.path.join(idx, a["key"])):
             os.symlink(d, os.path.join(idx, a["key"]))
     return meta
+
+
+def ctx_link(p, used):
+    """The name of a context link: the path's last two parts, made unique."""
+    link = "-".join([x for x in p.split("/") if x][-2:])
+    while link in used:
+        link += "_"
+    used.add(link)
+    return link
+
+
+def m_edit(a):
+    """Changes a task's repos and context in place: worktrees and context links, meta.json, and the two lists in
+    TASK.md (the rest of it, the impl's plan and status included, stays as it is). Returns meta and team."""
+    d = expand(a["dir"])
+    with open(os.path.join(d, "meta.json")) as h:
+        m = json.load(h)
+    for c in a.get("add_repos") or []:
+        if any(r["name"] == c["name"] for r in m["repos"]):
+            raise Fail("%s is already in the task" % c["name"])
+        m["repos"].append(add_worktree(c, d, m["branch"]))
+    for name in a.get("rm_repos") or []:
+        r = next((x for x in m["repos"] if x["name"] == name), None)
+        if not r:
+            raise Fail("%s isn't in the task" % name)
+        if os.path.exists(r["wt"]):
+            dirty = [x for x in git(r["wt"], "status", "--porcelain")[1].splitlines() if x.strip()]
+            if dirty and not a.get("force"):
+                raise Fail("%s has %d uncommitted change(s): --force throws them away (commits stay in the branch)" % (name, len(dirty)))
+            code, _, err = git(r["main"], "worktree", "remove", "--force", r["wt"])
+            if code != 0:
+                raise Fail("%s: %s" % (name, err))
+        m["repos"] = [x for x in m["repos"] if x["name"] != name]
+    gone = set(expand(p).rstrip("/") for p in a.get("rm_context") or [])
+    for c in [c for c in m["context"] if c["link"] in gone or c["path"].rstrip("/") in gone]:
+        try:
+            os.unlink(os.path.join(d, "context", c["link"]))
+        except OSError:
+            pass
+        m["context"].remove(c)
+    used = set(c["link"] for c in m["context"])
+    for p in a.get("add_context") or []:
+        p = expand(p).rstrip("/")
+        if not os.path.exists(p) or any(c["path"].rstrip("/") == p for c in m["context"]):
+            continue
+        c = {"path": p, "link": ctx_link(p, used)}
+        os.makedirs(os.path.join(d, "context"), exist_ok=True)
+        os.symlink(p, os.path.join(d, "context", c["link"]))
+        m["context"].append(c)
+    write(os.path.join(d, "meta.json"), json.dumps(m, ensure_ascii=False, indent=2))
+    try:
+        with open(os.path.join(d, "TASK.md")) as h:
+            text = h.read()
+        text = re.sub(r"(## Репозитории \(меняем\)\n\n).*?(\n\n## )", lambda x: x.group(1) + repos_md(m) + x.group(2), text, count=1, flags=re.S)
+        text = re.sub(r"(## Контекст \(только читать\)\n\n).*?(\n\n## )", lambda x: x.group(1) + ctx_md(m) + x.group(2), text, count=1, flags=re.S)
+        write(os.path.join(d, "TASK.md"), text)
+    except OSError:
+        write(os.path.join(d, "TASK.md"), task_md(m))
+    try:
+        with open(os.path.join(d, "team.json")) as h:
+            team = json.load(h)
+    except (OSError, ValueError):
+        team = {}
+    return {"meta": m, "team": team}
 
 
 def m_briefs(a):
@@ -547,7 +615,7 @@ def m_yt_files(a):
     return out
 
 
-MACHINE = {"home": m_home, "repos": m_repos, "tasks": m_tasks, "create": m_create, "briefs": m_briefs, "team": m_team,
+MACHINE = {"home": m_home, "repos": m_repos, "tasks": m_tasks, "create": m_create, "edit": m_edit, "briefs": m_briefs, "team": m_team,
            "chat_dir": m_chat_dir, "sessions": m_sessions,
            "yt_board": m_yt_board, "yt_issue": m_yt_issue, "yt_files": m_yt_files}
 
@@ -928,6 +996,53 @@ def cmd_open(conf, a):
     return {"key": m["key"], "space": res["space"], "reopened": True}
 
 
+def cmd_edit(conf, a):
+    """Repos and context of a task, changed in place. A repo added brings its docs card along and a repo removed takes
+    it away (namespaces.<ns>.docs), as when a task is made. Then each role's agent is told what changed."""
+    m = find_task(conf, a.key, a.ns)
+    ns = namespace(conf, m["ns"])
+    on = ns["on"]
+    home = on_machine(on, "home", {})
+    clones = on_machine(on, "repos", {"root": ns["repos"]})
+    add_repos = []
+    for r in a.add_repo or []:
+        c = next((c for c in clones if c["path"] == r or c["name"] == r), None)
+        if not c and r.startswith("/"):
+            c = {"name": os.path.basename(r.rstrip("/")), "path": r}
+        if not c:
+            raise Fail("no clone %r under %s" % (r, ns["repos"]))
+        add_repos.append(c)
+    add_ctx = [p.replace("~", home, 1) for p in a.add_context or []]
+    rm_ctx = list(a.rm_context or [])
+    if add_repos:
+        add_ctx += docs_context(ns, clones, [c["name"] for c in add_repos])
+    if (ns.get("docs") or {}).get("per_repo"):
+        rm_ctx += [docs_context(ns, clones, [name])[-1] for name in a.rm_repo or [] if docs_context(ns, clones, [name])]
+    if not (add_repos or a.rm_repo or add_ctx or rm_ctx):
+        raise Fail("nothing to change: --add-repo, --rm-repo, --add-context or --rm-context")
+    res = on_machine(on, "edit", {"dir": m["dir"], "add_repos": add_repos, "rm_repos": a.rm_repo or [], "force": a.force,
+                                  "add_context": add_ctx, "rm_context": rm_ctx})
+    meta = res["meta"]
+    told = []
+    if not a.quiet:
+        what = []
+        if add_repos:
+            what.append("добавлены репозитории %s" % ", ".join(c["name"] for c in add_repos))
+        if a.rm_repo:
+            what.append("убраны репозитории %s (их worktree удалены, ветки остались; там больше не работай)" % ", ".join(a.rm_repo))
+        if a.add_context or a.rm_context:
+            what.append("изменён контекст")
+        text = ("Состав задачи %s изменился: %s. Перечитай разделы «Репозитории (меняем)» и «Контекст (только читать)» в %s/TASK.md."
+                % (meta["key"], "; ".join(what) or "изменён контекст", meta["dir"]))
+        for role, t in res["team"].items():
+            if role == "chats" or not isinstance(t, dict) or not t.get("address"):
+                continue
+            to = "%s/%s" % (on, t["address"]) if on else t["address"]
+            if subprocess.run([tool("hc"), "send", to, text], capture_output=True, text=True, timeout=30).returncode == 0:
+                told.append(role)
+    return {"key": meta["key"], "repos": [r["name"] for r in meta["repos"]], "context": [c["path"] for c in meta["context"]], "told": told}
+
+
 def find_task(conf, key, ns=None):
     tasks = [m for m in all_tasks(conf, ns) if m.get("key") == key]
     if not tasks:
@@ -1057,6 +1172,15 @@ def main():
     o = sub.add_parser("open")
     o.add_argument("key")
     o.add_argument("--ns")
+    e = sub.add_parser("edit")
+    e.add_argument("key")
+    e.add_argument("--ns")
+    e.add_argument("--add-repo", action="append", help="a clone's name or full path (repeatable)")
+    e.add_argument("--rm-repo", action="append", help="a repo of the task: its worktree goes, its branch stays (repeatable)")
+    e.add_argument("--force", action="store_true", help="with --rm-repo: also when it has uncommitted changes (they are lost)")
+    e.add_argument("--add-context", action="append", help="a read-only path (repeatable)")
+    e.add_argument("--rm-context", action="append", help="a context path or its link name (repeatable)")
+    e.add_argument("--quiet", action="store_true", help="don't tell the agents")
     se = sub.add_parser("sessions")
     se.add_argument("key")
     se.add_argument("--ns")
@@ -1086,6 +1210,8 @@ def main():
             out = cmd_start(conf, a)
         elif a.cmd == "open":
             out = cmd_open(conf, a)
+        elif a.cmd == "edit":
+            out = cmd_edit(conf, a)
         elif a.cmd == "sessions":
             out = cmd_sessions(conf, a)
         elif a.cmd == "chat":
