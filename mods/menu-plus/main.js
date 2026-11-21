@@ -7,7 +7,7 @@
 
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { run, props, closeOverlay, openOverlay, theme, keys, terminals, spaces, panes, exec, agents } from "herdr";
+import { run, props, closeOverlay, openOverlay, theme, keys, terminals, spaces, panes, exec } from "herdr";
 
 // Where a space is now: its first terminal's live folder, else where it was made.
 function place(s) {
@@ -57,12 +57,13 @@ function items(p, git) {
       ];
     }
     case "tab": {
-      // Claude and Codex in this tab: agents-plus restarts one on the same conversation.
-      const here = agents().filter((a) => a.tab === tg.id && (a.app === "claude-code" || a.app === "codex"));
-      const who = (a) => (a.app === "codex" ? "Codex" : "Claude");
-      const restart = here.map((a) => [
-        here.filter((b) => b.app === a.app).length > 1 ? `Restart ${who(a)} ${a.address}` : `Restart ${who(a)}`,
-        `agents-plus.restart:${a.address}`,
+      // Claude and Codex in this tab: agents-plus restarts one on the same conversation. By the
+      // program too, not only the reported status: an old version that reports none needs it most.
+      const kind = (p) => (p.app === "codex" || /^codex/.test(p.program?.key ?? "") ? "Codex" : p.app === "claude-code" || /^claude/.test(p.program?.key ?? "") ? "Claude" : null);
+      const here = panes().filter((p) => p.tab === tg.id && p.terminal && kind(p));
+      const restart = here.map((p) => [
+        here.filter((q) => kind(q) === kind(p)).length > 1 ? `Restart ${kind(p)} ${p.terminal}` : `Restart ${kind(p)}`,
+        `agents-plus.restart:${p.terminal}`,
         {},
       ]);
       return [
