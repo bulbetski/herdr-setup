@@ -35,6 +35,7 @@ git checkout -t origin/main
 - `bin/herdr-task`: задачи для команды агентов, на нём работает мод Tasks.
 - `bin/ssh-browser`: Chrome, который ходит на выбранные сайты через SSH-туннель.
 - `bin/ssh-add-host`: вход на машину по ключу вместо пароля, на нём работает диалог Add machine.
+- `bin/agent-restart`: перезапуск Claude Code или Codex в терминале с тем же диалогом, на нём работает кнопка ↻ у агента.
 - `themes/whitby-*.json`: светлая и тёмная темы окна из [herdr-whitby](https://github.com/shellscape/herdr-whitby). `themes/atom-one-dark.json`: палитра One Dark.
 - `claude-themes/whitby-*.json`: темы Claude Code в цветах Whitby (`"theme": "custom:whitby-light"` в `~/.claude/settings.json`).
 - `keys.json`, `settings.json`: клавиши и настройки окна. `minimum_contrast: 2` нужен светлой теме, иначе бледный текст агентов на белом фоне не виден.
@@ -45,7 +46,7 @@ git checkout -t origin/main
 
 | Место | Мод |
 |---|---|
-| Сайдбар | `space-folders`: спейсы по папкам, в шапке Spaces кнопки «+ssh» (Add machine), New folder, New space; сверху и снизу `workspace-chrome-plus` (внизу только Settings) |
+| Сайдбар | `space-folders`: спейсы по папкам, в шапке Spaces кнопки «+ssh» (Add machine), New folder, New space; под ними `agents-plus`; сверху и снизу `workspace-chrome-plus` (внизу только Settings) |
 | Колонка слева | `file-preview` с `mode: "tree"`: Explorer |
 | Панель вкладок | `tabs-plus`: вкладки и кнопки Explorer, Tasks (и MRs, Worklog, если эти моды установлены) |
 | Статус-бар слева | `workspace-status-plus`: машина спейса и состояние связи с ней |
@@ -62,7 +63,9 @@ git checkout -t origin/main
 | `herdr-md` | [ryanthedev/herdr-md](https://github.com/ryanthedev/herdr-md), без правок | `mdh open файл.md`: Markdown с Mermaid |
 | `usage-limits` | [nozikov/herdr-usage-limits](https://github.com/nozikov/herdr-usage-limits), без правок | Лимиты Claude и Codex |
 | `auto-title` | [kryptamine/herdr-auto-title](https://github.com/kryptamine/herdr-auto-title), без правок | Называет вкладки по тому, что в них происходит; свой сервис ставится из его окна |
-| `tabs-plus` | клон встроенного `tabs` | Кнопки Explorer, Tasks, MRs, Worklog; спрятанные вкладки не показываются |
+| `tabs-plus` | клон встроенного `tabs` | Кнопки Explorer, Tasks, MRs, Worklog; спрятанные вкладки не показываются; правый клик открывает `menu-plus` |
+| `agents-plus` | клон встроенного `agents` | Список агентов с кнопкой ↻: перезапуск с тем же диалогом, см. «Перезапуск агента» |
+| `menu-plus` | клон встроенного `menu` | Меню вкладки с пунктом Restart Claude / Restart Codex |
 | `new-menu-plus` | клон встроенного `new-menu` | Меню «+» без встроенных Claude Code и Codex: остаются свои обёртки из `programs.json` |
 | `workspace-status-plus` | клон встроенного `workspace-status` | Состояние связи с машиной спейса и ↻ Reconnect |
 | `machine-add-plus` | переписанный встроенный `machine-add` | Диалог Add machine: список машин и форма, вход по ключу вместо пароля, см. «Новая машина по ключу» |
@@ -108,6 +111,18 @@ git checkout -t origin/main
 - `ssh-browser [url]` открывает профиль и поднимает туннель (`ssh -D`), туннель живёт, пока профиль открыт.
 - `--status` печатает `off`, `down`, `nocorp` (туннель есть, а проверочная страница не отвечает) или `up`; `--tunnel` поднимает лежащий туннель, `--reconnect` переподнимает.
 - Мод `ssh-browser` в статус-баре раз в 15 секунд спрашивает `--status`, сам поднимает упавший туннель и по клику чинит или открывает браузер.
+
+### Перезапуск агента
+
+Нужен, когда агента надо запустить заново (новая версия Claude Code или Codex, другие переменные окружения), а диалог терять не хочется. Кнопка ↻ появляется при наведении на строку Claude или Codex в списке Agents, рядом с булавкой. В меню правого клика по вкладке есть тот же пункт: Restart Claude или Restart Codex для каждого агента во вкладке. Если агент сейчас работает или ждёт ответа, сначала спрашивается подтверждение, потому что текущий ход оборвётся.
+
+Делает это `bin/agent-restart <терминал>` (`--dry-run` только печатает команду, `--force` не спрашивает про занятого агента):
+
+1. `hc get` даёт pid агента, его команду и папку. Терминал может быть на другой машине (`vps/t7`).
+2. Id сессии. Claude пишет его в `<CLAUDE_CONFIG_DIR или ~/.claude>/sessions/<pid>.json`. Codex держит его в первой строке своего rollout-файла (`~/.codex/sessions/.../rollout-*.jsonl`); из файлов с той же папкой берётся тот, что записан ближе всего ко времени последней смены статуса агента, так различаются два Codex в одной папке.
+3. Агент получает SIGTERM (через 12 секунд SIGKILL), в терминал возвращается shell, и туда вводится `cd <папка> && <та же команда> --resume <id>` (у Codex `resume <id>`). Обёртка пространства имён (`claude-work`, `codex-personal`) и флаги вроде `--dangerously-skip-permissions` и `--no-daemon` сохраняются, стартовый промпт отбрасывается.
+
+Агент, который открывает свой первый диалог (например, вопрос о доверии к папке), ещё не записал сессию: перезапуск такого скажет, что сессии нет.
 
 ### Новая машина по ключу
 
@@ -201,7 +216,7 @@ YouTrack включается секцией `youtrack`:
 Моё в этом репозитории под MIT, см. `LICENSE`. У взятого чужого своя лицензия, текст лежит рядом:
 
 - `file-preview`, `file-preview-panel`, `space-folders`, `herdr-md`, `usage-limits`, `auto-title`: MIT, `LICENSE` в папке мода, с копирайтом автора.
-- `tabs-plus`, `new-menu-plus`, `workspace-status-plus`, `machine-add-plus`, `workspace-chrome-plus`: клоны модов Herdr, Apache-2.0, `LICENSE` в папке мода, в начале `main.js` отмечено, что файл изменён.
+- `tabs-plus`, `new-menu-plus`, `workspace-status-plus`, `machine-add-plus`, `workspace-chrome-plus`, `agents-plus`, `menu-plus`: клоны модов Herdr, Apache-2.0, `LICENSE` в папке мода, в начале `main.js` отмечено, что файл изменён.
 - Темы Whitby (`themes/whitby-*.json`, `claude-themes/whitby-*.json`): MPL-2.0, `LICENSE-whitby` рядом.
 - `herdr-md/marked.js`: библиотека marked, её лицензия в `marked.LICENSE.md`.
 

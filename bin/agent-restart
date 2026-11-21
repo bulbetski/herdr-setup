@@ -1,0 +1,277 @@
+#!/usr/bin/env python3
+"""agent-restart <terminal> [--force] [--dry-run]
+
+Restarts the Claude Code or Codex running in a Herdr terminal and resumes the same
+conversation there. The terminal can be on another machine (`vps/t7`).
+
+1. `hc get` gives the agent's pid, its command and folder.
+2. The session id: Claude writes it to <config>/sessions/<pid>.json; Codex keeps it in the
+   first line of its rollout file, so the rollout in that folder whose last write is closest
+   to the agent's last status change is the one.
+3. The agent gets SIGTERM, the terminal's shell comes back (the terminal is a shell around
+   the agent, or `keep` gives it one), and the same command is typed there with
+   `--resume <id>` (Claude) or `resume <id>` (Codex). A namespace wrapper (`claude-work`) stays.
+
+Busy agents (working, blocked) are left alone unless --force: exit code 3.
+Prints one JSON line: {"ok": true, "agent", "session", "command"} or {"ok": false, "error"}.
+"""
+
+import json
+import os
+import re
+import shlex
+import subprocess
+import sys
+import time
+
+SHELLS = {"sh", "bash", "zsh", "fish", "dash", "ksh", "nu", "-sh", "-bash", "-zsh"}
+
+# Options that take a value, so the value isn't mistaken for a prompt.
+CLAUDE_VALUE = {
+    "--model", "--permission-mode", "--add-dir", "--effort", "--settings", "--setting-sources",
+    "--mcp-config", "--append-system-prompt", "--system-prompt", "--agent", "--agents",
+    "--allowedTools", "--allowed-tools", "--disallowedTools", "--disallowed-tools", "--tools",
+    "--fallback-model", "--plugin-dir", "--betas", "--debug-file", "--name", "-n",
+    "--output-format", "--input-format", "--max-turns",
+}
+# Options dropped: the old session, a one-off prompt mode.
+CLAUDE_DROP = {"--continue", "-c", "--fork-session", "--print", "-p"}
+CLAUDE_DROP_VALUE = {"--session-id", "--resume", "-r", "--from-pr"}
+
+CODEX_VALUE = {
+    "-c", "--config", "--enable", "--disable", "--remote", "--remote-auth-token-env",
+    "-m", "--model", "--local-provider", "-p", "--profile", "-s", "--sandbox", "-C", "--cd",
+    "--add-dir", "-a", "--ask-for-approval",
+}
+CODEX_DROP = {"--last", "--all", "--include-non-interactive"}
+CODEX_DROP_VALUE = {"-i", "--image"}
+
+
+def out(ok, code=0, **kw):
+    print(json.dumps({"ok": ok, **kw}, ensure_ascii=False))
+    sys.exit(code)
+
+
+def fail(msg, code=1):
+    out(False, code, error=msg)
+
+
+def hc(*args, check=True):
+    # As the app, not as this terminal: a send from an agent's terminal gets <hc> tags.
+    env = {k: v for k, v in os.environ.items() if k not in ("HC_TERMINAL_ID", "HC_SCOPE")}
+    r = subprocess.run(["hc", *args], capture_output=True, text=True, env=env)
+    if check and r.returncode != 0:
+        fail(f"hc {args[0]}: {(r.stderr or r.stdout).strip()}")
+    return r
+
+
+def sh(machine, script, *args, timeout=30):
+    """Runs a POSIX sh script here or on the machine; returns stdout ("" on failure)."""
+    argv = ["sh", "-c", script, "sh", *args]
+    if machine:
+        r = hc("exec", "--on", machine, "--timeout", str(timeout), *argv, check=False)
+    else:
+        r = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+    return r.stdout if r.returncode == 0 else ""
+
+
+def get(address):
+    return json.loads(hc("get", address, "--json").stdout)
+
+
+def base(path):
+    return os.path.basename(path or "")
+
+
+def kind_of(term):
+    app = (term.get("status") or {}).get("app") or ""
+    if app.startswith("claude"):
+        return "claude"
+    if app == "codex":
+        return "codex"
+    fg = (term.get("foreground") or {}).get("argv") or []
+    for word in fg[:2]:
+        b = base(word)
+        if b in ("claude", "codex") or re.search(r"(^|/)(claude|codex)(\.js)?$", word):
+            return "claude" if "claude" in b else "codex"
+    return None
+
+
+def process_env(machine, pid):
+    text = sh(machine, 'tr "\\0" "\\n" < /proc/"$1"/environ 2>/dev/null || ps eww -o command= -p "$1"', str(pid))
+    env = {}
+    for key in ("CLAUDE_CONFIG_DIR", "CODEX_HOME", "NS"):
+        m = re.search(rf"(?:^|\s){key}=(\S+)", text)
+        if m:
+            env[key] = m.group(1)
+    return env
+
+
+def age_seconds(machine, pid):
+    """How long the agent has been running, from ps etime ([[dd-]hh:]mm:ss)."""
+    t = sh(machine, 'ps -o etime= -p "$1"', str(pid)).strip()
+    if not t:
+        return None
+    days, _, rest = t.rpartition("-")
+    parts = [int(x) for x in rest.split(":")]
+    while len(parts) < 3:
+        parts.insert(0, 0)
+    return (int(days) if days else 0) * 86400 + parts[0] * 3600 + parts[1] * 60 + parts[2]
+
+
+def claude_session(machine, pid, env):
+    cfg = env.get("CLAUDE_CONFIG_DIR", "")
+    text = sh(machine, 'cat "${1:-$HOME/.claude}/sessions/$2.json"', cfg, str(pid))
+    try:
+        return json.loads(text)["sessionId"]
+    except (ValueError, KeyError):
+        fail(f"no Claude session file for pid {pid}: is this Claude Code too old to write sessions/?")
+
+
+def codex_session(machine, pid, cwd, env, status_ms):
+    home = env.get("CODEX_HOME", "")
+    age = age_seconds(machine, pid)
+    # Rollouts written since the agent started; a resumed thread nobody has written to since
+    # is older, so then look back further.
+    windows = [f"-mmin -{age // 60 + 2}"] if age is not None else []
+    windows.append("-mtime -30")
+    for window in windows:
+        script = (
+            'd="${1:-$HOME/.codex}/sessions"; [ -d "$d" ] || exit 0; '
+            f'find "$d" -name "rollout-*.jsonl" {window} | while read -r f; do '
+            'm=$(stat -c %Y "$f" 2>/dev/null || stat -f %m "$f"); '
+            'printf "%s\\t" "$m"; head -n 1 "$f" | cut -c 1-4000; done'
+        )
+        found = []
+        for line in sh(machine, script, home, timeout=60).splitlines():
+            mtime, _, head = line.partition("\t")
+            sid = re.search(r'"id":"([0-9a-f-]{36})"', head)
+            dir_ = re.search(r'"cwd":"((?:[^"\\]|\\.)*)"', head)
+            if not (sid and dir_ and mtime.isdigit()):
+                continue
+            if json.loads(f'"{dir_.group(1)}"') != cwd:
+                continue
+            # A sub-agent's thread names its parent; it isn't the conversation on screen.
+            if re.search(r'"source":\{"subagent"', head):
+                continue
+            found.append((int(mtime), sid.group(1)))
+        if found:
+            target = (status_ms or time.time() * 1000) / 1000
+            found.sort(key=lambda f: (abs(f[0] - target), -f[0]))
+            return found[0][1]
+    fail(f"no Codex session found for folder {cwd}")
+
+
+def installed(machine, name):
+    """Whether the login shell there finds the program (wrappers live in ~/.local/bin)."""
+    return bool(sh(machine, '"${SHELL:-sh}" -lc "command -v $1" >/dev/null 2>&1 && echo yes', name).strip())
+
+
+def wrapped_command(term):
+    """What the terminal was started with, unwrapped from Herdr's `zsh -lic '"$@"; exec "$0" -li'`."""
+    argv = term.get("argv") or []
+    if len(argv) >= 5 and base(argv[0]) in SHELLS and argv[1].startswith("-") and "c" in argv[1] and '"$@"' in argv[2]:
+        return argv[4:]
+    if argv and base(argv[0]) in SHELLS:
+        return []
+    return argv
+
+
+def kept_args(kind, args):
+    value, drop, drop_value = (
+        (CLAUDE_VALUE, CLAUDE_DROP, CLAUDE_DROP_VALUE) if kind == "claude" else (CODEX_VALUE, CODEX_DROP, CODEX_DROP_VALUE)
+    )
+    kept, i = [], 0
+    if kind == "codex" and args[:1] and args[0] in ("resume", "fork"):
+        args = args[1:]
+        if args and not args[0].startswith("-"):
+            args = args[1:]
+    while i < len(args):
+        a = args[i]
+        name = a.split("=", 1)[0]
+        if a == "--":
+            break
+        if name in drop:
+            i += 1
+        elif name in drop_value:
+            # --resume's value is optional.
+            i += 1 if "=" in a else (2 if i + 1 < len(args) and not args[i + 1].startswith("-") else 1)
+        elif name in value:
+            if "=" in a:
+                kept.append(a)
+                i += 1
+            else:
+                kept += args[i : i + 2]
+                i += 2
+        elif a.startswith("-"):
+            kept.append(a)
+            i += 1
+        else:
+            i += 1  # a prompt: it was sent once already
+    return kept
+
+
+def main():
+    argv = sys.argv[1:]
+    force = "--force" in argv
+    dry = "--dry-run" in argv
+    rest = [a for a in argv if not a.startswith("--")]
+    if len(rest) != 1:
+        fail("usage: agent-restart <terminal> [--force] [--dry-run]", 2)
+    address = rest[0]
+    machine = address.split("/", 1)[0] if "/" in address else None
+
+    term = get(address)
+    if term.get("state") != "live":
+        fail(f"{address} is not live")
+    kind = kind_of(term)
+    fg = term.get("foreground") or {}
+    if not kind or base((fg.get("argv") or [""])[0]) in SHELLS:
+        fail(f"no Claude or Codex running in {address}")
+    state = (term.get("status") or {}).get("state")
+    if state in ("working", "blocked") and not force:
+        out(False, 3, error=f"{address} is {state}", busy=state)
+
+    pid, cwd = fg["pid"], fg.get("cwd") or term.get("cwd")
+    env = process_env(machine, pid)
+    session = claude_session(machine, pid, env) if kind == "claude" else codex_session(machine, pid, cwd, env, term.get("status_ms"))
+
+    # The same program: the terminal's wrapper (claude-work), else the namespace's, else plain.
+    started = wrapped_command(term)
+    if started and re.fullmatch(rf"{kind}(-[\w.]+)?", base(started[0])):
+        program = started[0]
+    elif env.get("NS") and installed(machine, f"{kind}-{env['NS']}"):
+        program = f"{kind}-{env['NS']}"
+    else:
+        program = kind
+    args = kept_args(kind, (fg.get("argv") or [])[1:])
+    cmd = [program, *args, "--resume", session] if kind == "claude" else [program, "resume", session, *args]
+    line = f"cd {shlex.quote(cwd)} && {shlex.join(cmd)}"
+    if dry:
+        out(True, agent=kind, session=session, command=line, dry_run=True)
+
+    # Stop it, and wait for the shell to be back in front.
+    kill = f'kill -TERM "$1"'
+    sh(machine, kill, str(pid))
+    deadline = time.time() + 20
+    killed = False
+    while True:
+        time.sleep(0.3)
+        now = get(address)
+        front = now.get("foreground") or {}
+        if front.get("pid") != pid and base((front.get("argv") or [""])[0]) in SHELLS:
+            break
+        if now.get("state") != "live":
+            fail(f"{address} ended with its agent: it has no shell to come back to (start it with keep)")
+        if time.time() > deadline - 8 and not killed:
+            sh(machine, 'kill -KILL "$1"', str(pid))
+            killed = True
+        if time.time() > deadline:
+            fail(f"{kind} in {address} didn't stop")
+    time.sleep(0.4)  # the shell draws its prompt
+    hc("send", address, line)
+    out(True, agent=kind, session=session, command=line)
+
+
+if __name__ == "__main__":
+    main()
