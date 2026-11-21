@@ -878,6 +878,7 @@ export default class Spaces extends View {
       .child(h_flex().h(31).pl(16).pr(10).items_center().justify_between().text_size(11.5).text_color(t.dim)
         .when(!collapsed, el => el.child("Spaces"))
         .child(h_flex().gap(2)
+          .when(!collapsed, el => el.child(button("machine-add", "server", () => run("mod.open", { name: "machine-add-plus" })).tooltip("Add machine")))
           .when(!collapsed, el => el.child(button("folder-new", "folder-plus", () => this.newFolder(null))))
           .child(button("space-new", "plus", () => newSpaceIn(undefined, null)))))
       .child(v_flex().flex_1().min_h(0).px(8).pb(14).overflow_y_scrollbar().mode("always")

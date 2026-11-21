@@ -14,6 +14,9 @@ checks that `ssh <name>` gets in without a password. The Add machine dialog
                      [--step hostkey,key,install,config,verify]
       without --password-file it asks for the password; without
       --fingerprint it asks before trusting a host key it hasn't seen.
+  ssh-add-host herdr-add TARGET [--name NAME] [--password-file FILE]
+      `hc machine add TARGET --install` with the password and no key;
+      nothing is saved, so a reconnect asks for the password again.
       NAME already in ~/.ssh/config: its entry gets the key's IdentityFile
       and HOST may be left out.
 
@@ -134,6 +137,27 @@ def tilde(path):
     return "~" + path[len(HOME):] if path.startswith(HOME + "/") else path
 
 
+class askpass_env:
+    """An environment in which ssh (and what runs ssh) answers its password
+    prompt with password, through a throwaway SSH_ASKPASS helper."""
+
+    def __init__(self, password):
+        self.password = password
+
+    def __enter__(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        askpass = os.path.join(self.tmp.name, "askpass")
+        with open(askpass, "w") as f:
+            f.write('#!/bin/sh\nprintf \'%s\\n\' "$SSH_ADD_HOST_PW"\n')
+        os.chmod(askpass, 0o700)
+        env = dict(os.environ, SSH_ASKPASS=askpass, SSH_ASKPASS_REQUIRE="force", SSH_ADD_HOST_PW=self.password)
+        env.setdefault("DISPLAY", ":0")
+        return env
+
+    def __exit__(self, *_):
+        self.tmp.cleanup()
+
+
 def install_key(target, port, user, password, pub):
     """Logs in with the password and adds pub to authorized_keys there (once)."""
     parts = pub.split()
@@ -144,13 +168,7 @@ def install_key(target, port, user, password, pub):
         f"umask 077; mkdir -p ~/.ssh && chmod 700 ~/.ssh && touch {ak} && chmod 600 {ak}"
         f" && {{ grep -qF '{body}' {ak} || {{ [ ! -s {ak} ] || [ -z \"$(tail -c1 {ak})\" ] || echo >> {ak}; printf '%s\\n' '{line}' >> {ak}; }}; }}"
     )
-    with tempfile.TemporaryDirectory() as tmp:
-        askpass = os.path.join(tmp, "askpass")
-        with open(askpass, "w") as f:
-            f.write('#!/bin/sh\nprintf \'%s\\n\' "$SSH_ADD_HOST_PW"\n')
-        os.chmod(askpass, 0o700)
-        env = dict(os.environ, SSH_ASKPASS=askpass, SSH_ASKPASS_REQUIRE="force", SSH_ADD_HOST_PW=password)
-        env.setdefault("DISPLAY", ":0")
+    with askpass_env(password) as env:
         args = ["ssh", "-p", str(port), "-l", user,
                 "-o", "PubkeyAuthentication=no",
                 "-o", "PreferredAuthentications=keyboard-interactive,password",
@@ -233,6 +251,20 @@ def verify(name):
             stdin=subprocess.DEVNULL, timeout=40)
     if r.returncode != 0:
         raise Fail(f"`ssh {name}` still can't get in without a password: {r.stderr.strip().splitlines()[-1] if r.stderr.strip() else r.returncode}", "verify")
+
+
+def cmd_herdr_add(a):
+    """hc machine add with the password and no key: nothing is saved. Prints
+    hc's own --json answer and exits with its code."""
+    password = read_password(a.password_file)
+    if password is None:
+        password = getpass.getpass("password: ")
+    args = ["hc", "machine", "add", a.target, "--install", "--json"] + (["--name", a.name] if a.name else [])
+    with askpass_env(password) as env:
+        r = run(args, env=env, stdin=subprocess.DEVNULL, timeout=180)
+    sys.stdout.write(r.stdout)
+    sys.stderr.write(r.stderr)
+    sys.exit(r.returncode)
 
 
 def cmd_scan(a):
@@ -330,7 +362,13 @@ def main():
     s.add_argument("--fingerprint")
     s.add_argument("--add-machine", action="store_true")
     s.add_argument("--step", help="only these steps: hostkey,key,install,config,verify (the dialog runs them one by one)")
+    s = sub.add_parser("herdr-add", help="hc machine add with a password and no key")
+    s.add_argument("target")
+    s.add_argument("--name")
+    s.add_argument("--password-file")
     a = p.parse_args()
+    if a.cmd == "herdr-add":
+        return cmd_herdr_add(a)
 
     steps = []
 

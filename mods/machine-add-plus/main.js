@@ -7,8 +7,9 @@
 // "Password once, then a key" runs bin/ssh-add-host step by step: host key
 // (you confirm a new one), a key in ~/.ssh/keys, the public half into the
 // machine's authorized_keys, `Host <name>` in ~/.ssh/config, a login check
-// without the password; then `hc machine add --install`. "It already lets me
-// in" only adds the machine. Opened as a dialog (`mod.open machine-add-plus`)
+// without the password; then `hc machine add --install`. "Password only"
+// adds the machine with the password through SSH_ASKPASS and saves nothing.
+// "Already set up" only adds the machine. Opened as a dialog (`mod.open machine-add-plus`)
 // from Add machine in the sidebar (workspace-chrome-plus).
 
 import { View, div, svg } from "gpui-kit";
@@ -70,7 +71,7 @@ const STEPS = {
   install: { title: "Public key on the machine", idle: (j) => `Log in with the password once, add it to ${j.user || "you"}'s authorized_keys` },
   config: { title: "~/.ssh/config", idle: (j) => (j.existing ? `IdentityFile in Host ${j.name}` : `Host ${j.name}, so \`ssh ${j.name}\` just works`) },
   verify: { title: "Login without a password", idle: (j) => `ssh -o BatchMode=yes ${j.name}` },
-  herdr: { title: "Add to Herdr", idle: "Copies herdr-core there if it has none" },
+  herdr: { title: "Add to Herdr", idle: (j) => (j.auth === "once" ? "With the password, nothing saved; copies herdr-core there if it has none" : "Copies herdr-core there if it has none") },
 };
 
 export default class MachineAdd extends View {
@@ -84,8 +85,11 @@ export default class MachineAdd extends View {
     this.focus = null;
     this.job = null;
     this.copied = null;
+    // Placeholders are drawn by input(), dim: the Input's own takes the text color.
+    this.ph = {};
     const field = (key, placeholder, masked) => {
-      const s = InputState.new({ placeholder });
+      const s = InputState.new({});
+      this.ph[key] = placeholder;
       if (masked) s.set_masked(true);
       s.on("change", (_e, cx) => cx.notify());
       s.on("submit", (_e, cx) => this.connect(cx));
@@ -97,7 +101,7 @@ export default class MachineAdd extends View {
     this.port = field("port", "22");
     this.user = field("user", me());
     this.name = field("name", "from the address");
-    this.pw = field("pw", "used once, never saved", true);
+    this.pw = field("pw", "not saved anywhere", true);
     this.addr.focus();
     cx.timer.after(500, () => this.addr.focus());
     cx.spawn(async (cx) => {
@@ -132,7 +136,7 @@ export default class MachineAdd extends View {
       const h = (this.hosts ?? []).find((x) => x.alias === this.sel.slice(5));
       if (!h) return { errors: {} };
       const errors = {};
-      if (this.auth === "key" && !this.pw.value()) errors.pw = "Type the password";
+      if (this.auth !== "plain" && !this.pw.value()) errors.pw = "Type the password";
       return { existing: true, name: h.alias, host: h.hostname || h.alias, user: h.user || "", port: h.port || "22", errors };
     }
     const raw = this.addr.value().trim();
@@ -149,7 +153,7 @@ export default class MachineAdd extends View {
     if (name && !NAME_RE.test(name)) errors.name = "Letters, digits, . - _";
     else if (name && this.aliasTaken(name)) errors.name = `~/.ssh/config already has ${name}`;
     else if (name && this.machines.some((x) => x.name === name)) errors.name = `Herdr already has ${name}`;
-    if (this.auth === "key" && !this.pw.value()) errors.pw = "Type the password";
+    if (this.auth !== "plain" && !this.pw.value()) errors.pw = "Type the password";
     return { existing: false, name, host, user, port, errors };
   }
 
@@ -159,7 +163,7 @@ export default class MachineAdd extends View {
     const p = this.plan();
     this.tried = true;
     if (Object.keys(p.errors).length || !p.name) return cx.notify();
-    const order = this.auth === "key" ? ["hostkey", "key", "install", "config", "verify", "herdr"] : ["herdr"];
+    const order = this.auth === "key" ? ["hostkey", "key", "install", "config", "verify", "herdr"] : this.auth === "once" ? ["hostkey", "herdr"] : ["herdr"];
     this.job = { ...p, auth: this.auth, order, steps: Object.fromEntries(order.map((s) => [s, { state: "wait" }])), fps: null, fingerprint: null };
     this.tried = false;
     cx.notify();
@@ -205,6 +209,21 @@ export default class MachineAdd extends View {
     }
   }
 
+  // Runs fn with a file holding the password, in a fresh private temp
+  // folder; the script deletes it as soon as it has read it.
+  async withPassword(fn) {
+    const dir = (await exec("mktemp", ["-d"]).catch(() => null))?.stdout?.trim();
+    if (!dir) return { code: 1, stdout: "", stderr: "Couldn't make a temp folder for the password" };
+    try {
+      await writeTextFile(`${dir}/pw`, this.pw.value(), null);
+      return await fn(`${dir}/pw`);
+    } catch (e) {
+      return { code: 1, stdout: "", stderr: String(e) };
+    } finally {
+      await exec("rm", ["-rf", dir]).catch(() => null);
+    }
+  }
+
   async step(job, id) {
     const target = `${job.user ? job.user + "@" : ""}${job.host}`;
     const base = ["--json", "setup", "--name", job.name, ...(job.existing ? [] : ["--host", target, "-p", job.port])];
@@ -221,23 +240,16 @@ export default class MachineAdd extends View {
       return r;
     }
     if (id === "install") {
-      // The password goes in a file in a fresh private temp folder; the
-      // script deletes it as soon as it has read it.
-      const dir = (await exec("mktemp", ["-d"]).catch(() => null))?.stdout?.trim();
-      if (!dir) return { ok: false, error: "Couldn't make a temp folder for the password" };
-      try {
-        await writeTextFile(`${dir}/pw`, this.pw.value(), null);
-        return done(await this.script([...base, "--step", "install", "--password-file", `${dir}/pw`]));
-      } finally {
-        await exec("rm", ["-rf", dir]).catch(() => null);
-      }
+      const r = await this.withPassword((f) => this.script([...base, "--step", "install", "--password-file", f]));
+      return r.code === 1 && r.stdout === "" ? { ok: false, error: r.stderr } : done(r);
     }
     if (id === "herdr") {
       const args = job.auth === "key" || job.existing
         ? [job.name]
         : [`${target}${job.port !== "22" ? ":" + job.port : ""}`, "--name", job.name];
-      const r = await hc(["machine", "add", ...args, "--install", "--json"]).catch((e) => ({ code: 1, stdout: "", stderr: String(e) }));
-      if (r.code === 0) return { ok: true, text: `${job.name} is in the sidebar` };
+      const r = job.auth === "once" ? await this.withPassword((f) => exec(SCRIPT(), ["herdr-add", ...args, "--password-file", f], { timeout: 200000 }))
+        : await hc(["machine", "add", ...args, "--install", "--json"]);
+      if (r.code === 0) return { ok: true, text: job.auth === "once" ? `${job.name} is in the sidebar. Nothing saved: a reconnect asks for the password again` : `${job.name} is in the sidebar` };
       let why;
       try {
         why = JSON.parse(r.stdout || r.stderr).error ?? {};
@@ -246,7 +258,7 @@ export default class MachineAdd extends View {
       }
       const command = `hc machine add ${args.map(shellArg).join(" ")}`;
       if (["login_needed", "auth_failed"].includes(why.kind) || /password|permission denied/i.test(why.message ?? ""))
-        return { ok: false, error: "It asks for a password. Go back and pick “Password once, then a key”, or run this in a terminal:", command };
+        return { ok: false, error: job.auth === "plain" ? "It asks for a password. Go back and pick a way with the password, or add it in a terminal:" : "The password didn't get through. Check it and try again, or add it in a terminal:", command };
       return { ok: false, error: why.message || "hc machine add failed", command };
     }
     return done(await this.script([...base, "--step", id]));
@@ -308,29 +320,30 @@ export default class MachineAdd extends View {
       .when(!opts.w, (el) => el.flex_1())
       .child(div().text_size(11.5).font_medium().text_color(t.muted).child(label))
       .child(
-        Input.new(state)
+        div()
+          .relative()
           .h(36)
-          .px(11)
-          .items_center()
           .rounded(8)
           .border_1()
           .border_color(err ? t.blocked : this.focus === key ? t.accent : t.input)
           .bg(t.background)
-          .text_size(13)
-          .text_color(t.foreground),
+          .when(!state.value(), (el) =>
+            el.child(div().absolute().top(0).bottom(0).left(12).right(12).flex().items_center().text_size(13).text_color(t.dim).truncate().child(this.ph[key] ?? "")),
+          )
+          .child(Input.new(state).size_full().px(11).items_center().text_size(13).text_color(t.foreground)),
       )
       .when(Boolean(err), (el) => el.child(div().text_size(11.5).text_color(t.blocked).child(err)))
       .when(!err && Boolean(opts.hint), (el) => el.child(div().text_size(11.5).text_color(t.dim).truncate().child(opts.hint)));
   }
 
-  authCard(t, id, icon, title, text, badge) {
+  authCard(t, id, icon, title, text) {
     const on = this.auth === id;
     return v_flex()
       .id(`ma-auth-${id}`)
       .flex_1()
       .min_w(0)
       .p(12)
-      .gap(8)
+      .gap(6)
       .rounded(10)
       .border_1()
       .border_color(on ? t.accent : t.border)
@@ -339,16 +352,13 @@ export default class MachineAdd extends View {
       .hover((s) => s.border_color(on ? t.accent : t.input))
       .on_click((_e, cx) => {
         this.auth = id;
-        if (id === "key") this.pw.focus();
+        if (id !== "plain") this.pw.focus();
         cx.notify();
       })
       .child(
         h_flex()
-          .gap(9)
           .items_center()
           .child(this.tile(t, icon, on ? t.accent : t.muted, 26))
-          .child(div().min_w(0).truncate().text_size(12.8).font_semibold().text_color(t.foreground).child(title))
-          .when(Boolean(badge), (el) => el.child(div().flex_none().px(6).py(1).rounded(5).bg(t.ansi2 + "1f").text_size(10.5).font_medium().text_color(t.ansi2).child(badge)))
           .child(div().flex_1())
           .child(
             div()
@@ -363,7 +373,8 @@ export default class MachineAdd extends View {
               .when(on, (el) => el.child(div().size(8).rounded_full().bg(t.accent))),
           ),
       )
-      .child(div().text_size(11.8).line_height("17px").text_color(t.muted).child(text));
+      .child(div().pt(2).text_size(12.8).font_semibold().text_color(t.foreground).child(title))
+      .child(div().text_size(11.8).line_height("16px").text_color(t.muted).child(text));
   }
 
   // A code card: lines of [key, value], keys tinted.
@@ -487,18 +498,19 @@ export default class MachineAdd extends View {
             h_flex()
               .gap(10)
               .items_start()
-              .child(this.authCard(t, "key", "key", "Password once, then a key", "Herdr leaves a key there and never asks for the password again.", "best"))
-              .child(this.authCard(t, "plain", "shield", "It already lets me in", "Your ssh key or agent works. Just add the machine.")),
+              .child(this.authCard(t, "key", "key", "Make a key", "Password once, then a key there: never asked again."))
+              .child(this.authCard(t, "once", "terminal", "Password only", "No key, nothing saved. Every reconnect asks again."))
+              .child(this.authCard(t, "plain", "shield", "Already set up", "Your ssh key or agent already gets in.")),
           ),
       )
-      .when(key, (el) => el.child(this.input(t, "pw", this.pw, `Password${p.user ? " for " + p.user : ""}`, { error: p.errors.pw })))
+      .when(this.auth !== "plain", (el) => el.child(this.input(t, "pw", this.pw, `Password${p.user ? " for " + p.user : ""}`, { error: p.errors.pw })))
       .when(key && !host, (el) =>
         el.child(this.code(t, "Goes into ~/.ssh/config", [["Host", p.name], ["HostName", p.host, 1], ["User", p.user || me(), 1], ...(p.port !== "22" ? [["Port", p.port, 1]] : []), ["IdentityFile", p.name ? `~/.ssh/keys/id_ed25519_${p.name}` : "", 1], ["IdentitiesOnly", "yes", 1]])),
       )
       .when(key && Boolean(host), (el) => el.child(this.code(t, "Added to its entry in ~/.ssh/config", [["Host", host.alias], ["IdentityFile", `~/.ssh/keys/id_ed25519_${host.alias}`, 1]])))
-      .when(!key, (el) => el.child(this.code(t, "Herdr runs", [["hc", `machine add ${host ? host.alias : `${p.user ? p.user + "@" : ""}${p.host || "…"}${p.port !== "22" ? ":" + p.port : ""} --name ${p.name || "…"}`} --install`]])));
+      .when(!key, (el) => el.child(this.code(t, this.auth === "once" ? "Herdr runs, with the password through SSH_ASKPASS" : "Herdr runs", [["hc", `machine add ${host ? host.alias : `${p.user ? p.user + "@" : ""}${p.host || "…"}${p.port !== "22" ? ":" + p.port : ""} --name ${p.name || "…"}`} --install`]])));
     const ready = !Object.keys(p.errors).length && Boolean(p.name);
-    return this.pane(t, body, h_flex().gap(10).items_center().child(div().flex_1().text_size(11.5).text_color(t.dim).child("↵ connects  ·  esc closes")).child(this.btn(t, "ma-connect", key ? "Connect and make a key" : "Add machine", { solid: true, icon: "arrow", disabled: !ready && this.tried }, (_e, cx) => this.connect(cx))));
+    return this.pane(t, body, h_flex().gap(10).items_center().child(div().flex_1().text_size(11.5).text_color(t.dim).child("↵ connects  ·  esc closes")).child(this.btn(t, "ma-connect", key ? "Connect and make a key" : this.auth === "once" ? "Connect with the password" : "Add machine", { solid: true, icon: "arrow", disabled: !ready && this.tried }, (_e, cx) => this.connect(cx))));
   }
 
   machinePane(t) {
@@ -528,7 +540,7 @@ export default class MachineAdd extends View {
     const job = this.job;
     const failed = Boolean(job.failed);
     const head = job.done
-      ? this.header(t, "check", t.ansi2, `${job.name} is ready`, job.auth === "key" ? `ssh ${job.name} gets in without a password` : `${job.name} is in Herdr`)
+      ? this.header(t, "check", t.ansi2, `${job.name} is ready`, job.auth === "key" ? `ssh ${job.name} gets in without a password` : job.auth === "once" ? `${job.name} is in Herdr, with the password` : `${job.name} is in Herdr`)
       : this.header(t, failed ? "x" : job.asking ? "fingerprint" : "server", failed ? t.blocked : t.accent, failed ? "Something stopped it" : job.asking ? "Is this the right machine?" : `Connecting ${job.name}`, `${job.user ? job.user + "@" : ""}${job.host}${job.port !== "22" ? ":" + job.port : ""}`);
     const steps = job.order.map((id, i) => this.stepRow(t, id, i, i === job.order.length - 1));
     const foot = job.done
@@ -608,6 +620,28 @@ export default class MachineAdd extends View {
           })
           .child(svg(I("copy")).size(12))
           .child(this.copied === command ? "Copied" : "Copy"),
+      )
+      .child(
+        h_flex()
+          .id("ma-term")
+          .gap(5)
+          .px(8)
+          .h(24)
+          .items_center()
+          .rounded(6)
+          .bg(t.raised)
+          .border_1()
+          .border_color(t.border)
+          .text_size(11.5)
+          .text_color(t.foreground)
+          .cursor_pointer()
+          .hover((s) => s.bg(t.hover))
+          .on_click(() => {
+            run("tab.new", { name: "hc machine add", argv: ["sh", "-c", `${command}; printf '\\nPress Enter to close'; read _`] });
+            this.close();
+          })
+          .child(svg(I("terminal")).size(12))
+          .child("In a terminal"),
       );
   }
 

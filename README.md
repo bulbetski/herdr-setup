@@ -45,7 +45,7 @@ git checkout -t origin/main
 
 | Место | Мод |
 |---|---|
-| Сайдбар | `space-folders`: спейсы по папкам; сверху и снизу `workspace-chrome-plus` (Settings, Add machine) |
+| Сайдбар | `space-folders`: спейсы по папкам, в шапке Spaces кнопки Add machine, New folder, New space; сверху и снизу `workspace-chrome-plus` (внизу только Settings) |
 | Колонка слева | `file-preview` с `mode: "tree"`: Explorer |
 | Панель вкладок | `tabs-plus`: вкладки и кнопки Explorer, Tasks (и MRs, Worklog, если эти моды установлены) |
 | Статус-бар слева | `workspace-status-plus`: машина спейса и состояние связи с ней |
@@ -66,7 +66,7 @@ git checkout -t origin/main
 | `new-menu-plus` | клон встроенного `new-menu` | Меню «+» без встроенных Claude Code и Codex: остаются свои обёртки из `programs.json` |
 | `workspace-status-plus` | клон встроенного `workspace-status` | Состояние связи с машиной спейса и ↻ Reconnect |
 | `machine-add-plus` | переписанный встроенный `machine-add` | Диалог Add machine: список машин и форма, вход по ключу вместо пароля, см. «Новая машина по ключу» |
-| `workspace-chrome-plus` | клон встроенного `workspace-chrome` | Шапка и низ сайдбара; Add machine открывает `machine-add-plus` |
+| `workspace-chrome-plus` | клон встроенного `workspace-chrome` | Шапка и низ сайдбара; строки Add machine внизу нет, она переехала в шапку Spaces |
 | `conn-details` | свой | Полный текст последней ошибки связи: Copy, ↻ Reconnect |
 | `tasks` | свой | Задачи для команды агентов, доска YouTrack |
 | `ssh-browser` | свой | Состояние `ssh-browser` в статус-баре |
@@ -111,13 +111,13 @@ git checkout -t origin/main
 
 ### Новая машина по ключу
 
-Add machine внизу сайдбара открывает диалог `machine-add-plus`. От встроенного диалога Herdr в нём осталось только чтение `~/.ssh/config`, остальное написано заново.
+Кнопка с сервером в шапке Spaces (рядом с New folder и New space) открывает диалог `machine-add-plus`. От встроенного диалога Herdr в нём осталось только чтение `~/.ssh/config`, остальное написано заново.
 
 - Слева список: New machine, машины, которые уже есть в Herdr (с точкой состояния: зелёная, если связь есть), и хосты из `~/.ssh/config`, которых в Herdr ещё нет. Справа форма для выбранного.
-- New machine: адрес (можно сразу `user@host:port`), порт, пользователь, имя. Пустое имя берётся из адреса. Ниже две карточки: «Password once, then a key» и «It already lets me in». В первой нужен пароль, и под ним видно блок, который уйдёт в `~/.ssh/config`. Вторая только добавляет машину (`hc machine add ... --install`).
+- New machine: адрес (можно сразу `user@host:port`), порт, пользователь, имя. Пустое имя берётся из адреса. Ниже три способа входа. «Make a key»: пароль один раз, дальше вход по ключу; под паролем видно блок, который уйдёт в `~/.ssh/config`. «Password only»: ключ не создаётся и ничего не сохраняется, пароль уходит в `hc machine add` через `SSH_ASKPASS` (`ssh-add-host herdr-add`), а при каждом переподключении Herdr спросит его снова. «Already set up»: ssh уже пускает, машина просто добавляется (`hc machine add ... --install`). Подсказки в полях диалог рисует сам, бледным цветом: встроенная подсказка поля берёт цвет текста.
 - Хост из `~/.ssh/config`: те же карточки. При входе по ключу в его запись добавляется только `IdentityFile`.
 - Машина из Herdr: состояние, версия hc там, кнопка «New space on <имя>».
-- После Connect справа идут шаги, каждый со своим состоянием: ключ хоста, ключ на Mac, публичный ключ на машине, `~/.ssh/config`, вход без пароля, добавление в Herdr. Если машину этот компьютер ещё не видел, на первом шаге показывается отпечаток ED25519 и кнопки «Trust and continue» и «Not this one». Сверить его можно с `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` на самой машине. Если шаг упал, под ним текст ошибки, а внизу «Back to the form» и «Try again» (повтор продолжает с упавшего шага). В конце «<имя> is ready» и «New space on <имя>».
+- После Connect справа идут шаги, каждый со своим состоянием: ключ хоста, ключ на Mac, публичный ключ на машине, `~/.ssh/config`, вход без пароля, добавление в Herdr. Если машину этот компьютер ещё не видел, на первом шаге показывается отпечаток ED25519 и кнопки «Trust and continue» и «Not this one». Сверить его можно с `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` на самой машине. Если шаг упал, под ним текст ошибки (у шага Herdr ещё команда с кнопками Copy и «In a terminal», которая открывает её во вкладке, где пароль вводится руками), а внизу «Back to the form» и «Try again» (повтор продолжает с упавшего шага). В конце «<имя> is ready» и «New space on <имя>».
 - Шаги делает `bin/ssh-add-host setup --step <шаг>`. Ключ создаётся в `~/.ssh/keys/id_ed25519_<имя>` (в `~/.ssh/`, если папки `keys` нет; готовый ключ с таким именем берётся как есть). Публичный ключ дописывается в `~/.ssh/authorized_keys` на машине один раз, с правами 700/600. `Host <имя>` с `IdentityFile` и `IdentitiesOnly yes` встаёт в `~/.ssh/config` перед первым `Host`. Проверка: `ssh -o BatchMode=yes <имя> true`. Herdr добавляет машину с `--install`, то есть копирует туда herdr-core, если его нет.
 - Перед правкой `~/.ssh/config` старая версия копируется в `~/.backups/ssh-config-before-ssh-add-host-<дата>`.
 - Пароль нигде не сохраняется. Диалог пишет его во временную папку с правами 700, скрипт сразу удаляет файл и отдаёт пароль `ssh` через переменную окружения своего помощника `SSH_ASKPASS` (`SSH_ASKPASS_REQUIRE=force`, OpenSSH 8.4+), так что `sshpass` не нужен.
