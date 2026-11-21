@@ -11,6 +11,7 @@ checks that `ssh <name>` gets in without a password. The Add machine dialog
       the host's key fingerprints and whether ~/.ssh/known_hosts knows it
   ssh-add-host setup --name NAME --host [USER@]HOST [--user USER] [-p PORT]
                      [--password-file FILE] [--fingerprint SHA256:...] [--add-machine]
+                     [--step hostkey,key,install,config,verify]
       without --password-file it asks for the password; without
       --fingerprint it asks before trusting a host key it hasn't seen.
       NAME already in ~/.ssh/config: its entry gets the key's IdentityFile
@@ -255,9 +256,12 @@ def cmd_setup(a, steps, say):
     g = ssh_g(target_spec, a.port, user)
     host, port, user = g.get("hostname", target_spec), a.port or g.get("port", "22"), g.get("user", user or getpass.getuser())
     keyname = g.get("hostkeyalias") or host
+    want = set((a.step or "hostkey,key,install,config,verify").split(","))
 
     # 1. host key
-    if is_known(keyname, port):
+    if "hostkey" not in want:
+        pass
+    elif is_known(keyname, port):
         say("host key", f"{known_key(keyname, port)} is in known_hosts")
     else:
         lines, fps = scan(host, port)
@@ -278,27 +282,32 @@ def cmd_setup(a, steps, say):
         say("host key", f"trusted {listed}")
 
     # 2. key
-    key_path, pub, made = ensure_key(name)
-    say("key", f"{'made' if made else 'using'} {tilde(key_path)}")
+    if want & {"key", "install", "config"}:
+        key_path, pub, made = ensure_key(name)
+        if "key" in want:
+            say("key", f"{'made' if made else 'using'} {tilde(key_path)}")
 
     # 3. authorized_keys there
-    password = read_password(a.password_file)
-    if password is None:
-        if not sys.stdin.isatty():
-            raise Fail("No password: --password-file", "auth")
-        password = getpass.getpass(f"{user}@{host}'s password: ")
-    install_key(name if existing else host, port, user, password, pub)
-    say("authorized_keys", f"key added on {host}")
+    if "install" in want:
+        password = read_password(a.password_file)
+        if password is None:
+            if not sys.stdin.isatty():
+                raise Fail("No password: --password-file", "auth")
+            password = getpass.getpass(f"{user}@{host}'s password: ")
+        install_key(name if existing else host, port, user, password, pub)
+        say("authorized_keys", f"key added to {user}@{host}:~/.ssh/authorized_keys")
 
     # 4. ~/.ssh/config
-    say("ssh config", write_config(name, host, user, port, key_path))
+    if "config" in want:
+        say("ssh config", write_config(name, host, user, port, key_path))
 
     # 5. check
-    verify(name)
-    say("check", f"ssh {name} gets in without a password")
+    if "verify" in want:
+        verify(name)
+        say("check", f"ssh {name} gets in without a password")
 
     if a.add_machine:
-        r = run(["hc", "machine", "add", name])
+        r = run(["hc", "machine", "add", name, "--install"])
         if r.returncode != 0:
             raise Fail(f"hc machine add {name}: {(r.stderr or r.stdout).strip()}", "hc")
         say("herdr", f"added machine {name}")
@@ -320,6 +329,7 @@ def main():
     s.add_argument("--password-file")
     s.add_argument("--fingerprint")
     s.add_argument("--add-machine", action="store_true")
+    s.add_argument("--step", help="only these steps: hostkey,key,install,config,verify (the dialog runs them one by one)")
     a = p.parse_args()
 
     steps = []
