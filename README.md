@@ -45,7 +45,7 @@ git checkout -t origin/main
 
 | Место | Мод |
 |---|---|
-| Сайдбар | `space-folders`: спейсы по папкам, в шапке Spaces кнопки Add machine, New folder, New space; сверху и снизу `workspace-chrome-plus` (внизу только Settings) |
+| Сайдбар | `space-folders`: спейсы по папкам, в шапке Spaces кнопки «+ssh» (Add machine), New folder, New space; сверху и снизу `workspace-chrome-plus` (внизу только Settings) |
 | Колонка слева | `file-preview` с `mode: "tree"`: Explorer |
 | Панель вкладок | `tabs-plus`: вкладки и кнопки Explorer, Tasks (и MRs, Worklog, если эти моды установлены) |
 | Статус-бар слева | `workspace-status-plus`: машина спейса и состояние связи с ней |
@@ -111,7 +111,7 @@ git checkout -t origin/main
 
 ### Новая машина по ключу
 
-Кнопка с сервером в шапке Spaces (рядом с New folder и New space) открывает диалог `machine-add-plus`. От встроенного диалога Herdr в нём осталось только чтение `~/.ssh/config`, остальное написано заново.
+Кнопка «+ssh» в шапке Spaces (рядом с New folder и New space) открывает диалог `machine-add-plus`. От встроенного диалога Herdr в нём осталось только чтение `~/.ssh/config`, остальное написано заново.
 
 - Слева список: New machine, машины, которые уже есть в Herdr (с точкой состояния: зелёная, если связь есть), и хосты из `~/.ssh/config`, которых в Herdr ещё нет. Справа форма для выбранного.
 - New machine: адрес (можно сразу `user@host:port`), порт, пользователь, имя. Пустое имя берётся из адреса. Ниже три способа входа. «Make a key»: пароль один раз, дальше вход по ключу; под паролем видно блок, который уйдёт в `~/.ssh/config`. «Password only»: ключ не создаётся и ничего не сохраняется, пароль уходит в `hc machine add` через `SSH_ASKPASS` (`ssh-add-host herdr-add`), а при каждом переподключении Herdr спросит его снова. «Already set up»: ssh уже пускает, машина просто добавляется (`hc machine add ... --install`). Подсказки в полях диалог рисует сам, бледным цветом: встроенная подсказка поля берёт цвет текста.
