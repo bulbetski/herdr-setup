@@ -1,0 +1,355 @@
+#!/usr/bin/env python3
+"""ssh-add-host: log in to a machine without a password from now on.
+
+Logs in once with the password, puts a new key's public half into the
+machine's ~/.ssh/authorized_keys (the private half stays here, in
+~/.ssh/keys/ or ~/.ssh/), writes a `Host <name>` entry to ~/.ssh/config and
+checks that `ssh <name>` gets in without a password. The Add machine dialog
+(mod machine-add-plus) runs it; it works from a terminal too:
+
+  ssh-add-host scan HOST [-p PORT]
+      the host's key fingerprints and whether ~/.ssh/known_hosts knows it
+  ssh-add-host setup --name NAME --host [USER@]HOST [--user USER] [-p PORT]
+                     [--password-file FILE] [--fingerprint SHA256:...] [--add-machine]
+      without --password-file it asks for the password; without
+      --fingerprint it asks before trusting a host key it hasn't seen.
+      NAME already in ~/.ssh/config: its entry gets the key's IdentityFile
+      and HOST may be left out.
+
+--json prints one JSON object (the dialog reads it). The password file is
+deleted as soon as it is read; the password reaches ssh only through the
+environment of its SSH_ASKPASS helper, never through arguments or disk.
+"""
+
+import argparse
+import getpass
+import json
+import os
+import re
+import shutil
+import socket
+import subprocess
+import sys
+import tempfile
+import time
+
+HOME = os.path.expanduser("~")
+SSH_DIR = os.path.join(HOME, ".ssh")
+CONFIG = os.path.join(SSH_DIR, "config")
+NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+NO_MUX = ["-o", "ControlMaster=no", "-o", "ControlPath=none"]
+
+
+class Fail(Exception):
+    def __init__(self, text, kind="error", **extra):
+        super().__init__(text)
+        self.text, self.kind, self.extra = text, kind, extra
+
+
+def run(args, **kw):
+    return subprocess.run(args, capture_output=True, text=True, **kw)
+
+
+def ssh_g(target, port=None, user=None):
+    """What ssh would use for target: hostname, user, port, hostkeyalias."""
+    args = ["ssh", "-G"] + (["-p", str(port)] if port else []) + (["-l", user] if user else []) + [target]
+    r = run(args)
+    if r.returncode != 0:
+        raise Fail(r.stderr.strip() or f"ssh -G {target} failed")
+    out = {}
+    for line in r.stdout.splitlines():
+        k, _, v = line.partition(" ")
+        out.setdefault(k.lower(), v)
+    return out
+
+
+def known_key(host, port):
+    return host if str(port) == "22" else f"[{host}]:{port}"
+
+
+def is_known(host, port):
+    return run(["ssh-keygen", "-F", known_key(host, port)]).returncode == 0
+
+
+def scan(host, port):
+    """The host's key lines (as known_hosts lines) and their fingerprints."""
+    r = run(["ssh-keyscan", "-T", "8", "-p", str(port), host])
+    lines = [l for l in r.stdout.splitlines() if l.strip() and not l.startswith("#")]
+    if not lines:
+        why = (r.stderr.strip().splitlines() or ["no answer"])[-1]
+        raise Fail(f"Couldn't reach {host}:{port} ({why})", "unreachable")
+    fps = []
+    for line in lines:
+        f = run(["ssh-keygen", "-lf", "-"], input=line + "\n")
+        m = re.match(r"\d+ (SHA256:\S+) .*\((\w+)\)\s*$", f.stdout.strip())
+        if m:
+            fps.append({"type": m.group(2), "fingerprint": m.group(1)})
+    return lines, fps
+
+
+def read_password(path):
+    if not path:
+        return None
+    try:
+        with open(path) as f:
+            pw = f.read()
+    finally:
+        try:
+            os.unlink(path)
+            os.rmdir(os.path.dirname(path))
+        except OSError:
+            pass
+    return pw.rstrip("\n")
+
+
+def key_dir():
+    d = os.path.join(SSH_DIR, "keys")
+    return d if os.path.isdir(d) else SSH_DIR
+
+
+def ensure_key(name):
+    path = os.path.join(key_dir(), f"id_ed25519_{name}")
+    made = False
+    if not os.path.exists(path):
+        os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+        comment = f"{getpass.getuser()}@{socket.gethostname().split('.')[0]} {name}"
+        r = run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", comment, "-f", path])
+        if r.returncode != 0:
+            raise Fail(f"ssh-keygen: {r.stderr.strip()}")
+        made = True
+    pub_path = path + ".pub"
+    if not os.path.exists(pub_path):
+        r = run(["ssh-keygen", "-y", "-f", path])
+        if r.returncode != 0:
+            raise Fail(f"{path} has no .pub and ssh-keygen -y failed: {r.stderr.strip()}")
+        with open(pub_path, "w") as f:
+            f.write(r.stdout)
+    with open(pub_path) as f:
+        pub = f.read().strip()
+    return path, pub, made
+
+
+def tilde(path):
+    return "~" + path[len(HOME):] if path.startswith(HOME + "/") else path
+
+
+def install_key(target, port, user, password, pub):
+    """Logs in with the password and adds pub to authorized_keys there (once)."""
+    parts = pub.split()
+    body = " ".join(parts[:2])  # type and key, the comment may differ
+    line = re.sub(r"[^A-Za-z0-9+/=@._ :-]", "", pub)
+    ak = "~/.ssh/authorized_keys"
+    remote = (
+        f"umask 077; mkdir -p ~/.ssh && chmod 700 ~/.ssh && touch {ak} && chmod 600 {ak}"
+        f" && {{ grep -qF '{body}' {ak} || {{ [ ! -s {ak} ] || [ -z \"$(tail -c1 {ak})\" ] || echo >> {ak}; printf '%s\\n' '{line}' >> {ak}; }}; }}"
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        askpass = os.path.join(tmp, "askpass")
+        with open(askpass, "w") as f:
+            f.write('#!/bin/sh\nprintf \'%s\\n\' "$SSH_ADD_HOST_PW"\n')
+        os.chmod(askpass, 0o700)
+        env = dict(os.environ, SSH_ASKPASS=askpass, SSH_ASKPASS_REQUIRE="force", SSH_ADD_HOST_PW=password)
+        env.setdefault("DISPLAY", ":0")
+        args = ["ssh", "-p", str(port), "-l", user,
+                "-o", "PubkeyAuthentication=no",
+                "-o", "PreferredAuthentications=keyboard-interactive,password",
+                "-o", "NumberOfPasswordPrompts=1",
+                "-o", "StrictHostKeyChecking=yes",
+                "-o", "ConnectTimeout=10"] + NO_MUX + [target, remote]
+        r = run(args, env=env, stdin=subprocess.DEVNULL, timeout=60)
+    if r.returncode == 0:
+        return
+    err = r.stderr.strip()
+    m = re.search(r"Permission denied \(([^)]*)\)", err)
+    if m and not re.search(r"password|keyboard-interactive", m.group(1)):
+        raise Fail(f"{target} doesn't take passwords ({m.group(1)}): its admin has to add the key", "password_disabled")
+    if m:
+        raise Fail("The password didn't work", "auth")
+    if "Host key verification failed" in err or "REMOTE HOST IDENTIFICATION HAS CHANGED" in err:
+        raise Fail(f"{target}'s host key doesn't match ~/.ssh/known_hosts", "host_key_mismatch")
+    raise Fail(err.splitlines()[-1] if err else f"ssh exited with {r.returncode}")
+
+
+def find_host_block(lines, name):
+    """Index of the `Host` line naming name exactly, or None."""
+    for i, raw in enumerate(lines):
+        m = re.match(r"^\s*host\s*=?\s*(.*)$", raw, re.I)
+        if m and name in m.group(1).split():
+            return i
+    return None
+
+
+def write_config(name, host, user, port, key_path):
+    """Adds the entry (or the IdentityFile to an existing one). Backs up first."""
+    text = ""
+    if os.path.exists(CONFIG):
+        with open(CONFIG) as f:
+            text = f.read()
+    lines = text.splitlines()
+    ident = f"  IdentityFile {tilde(key_path)}"
+    i = find_host_block(lines, name)
+    if i is not None:
+        j = i + 1
+        while j < len(lines) and not re.match(r"^\s*(host|match)\b", lines[j], re.I):
+            j += 1
+        block = lines[i + 1:j]
+        if any(re.match(rf"^\s*identityfile\s*=?\s*({re.escape(tilde(key_path))}|{re.escape(key_path)})\s*$", l, re.I) for l in block):
+            return "already there"
+        lines[i + 1:i + 1] = [ident]
+        what = f"added IdentityFile to Host {name}"
+    else:
+        entry = [f"Host {name}", f"  HostName {host}", f"  User {user}"]
+        if str(port) != "22":
+            entry.append(f"  Port {port}")
+        entry += [ident, "  IdentitiesOnly yes", ""]
+        # Before the first Host/Match, so a later `Host *` can't override it
+        # and top-level Includes stay on top.
+        k = next((n for n, l in enumerate(lines) if re.match(r"^\s*(host|match)\b", l, re.I)), len(lines))
+        if k == len(lines) and lines and lines[-1].strip():
+            entry.insert(0, "")
+        lines[k:k] = entry
+        what = f"added Host {name}"
+    if text:
+        backups = os.path.join(HOME, ".backups")
+        os.makedirs(backups, exist_ok=True)
+        backup = base = os.path.join(backups, f"ssh-config-before-ssh-add-host-{time.strftime('%Y-%m-%d-%H%M%S')}")
+        n = 2
+        while os.path.exists(backup):
+            backup, n = f"{base}-{n}", n + 1
+        shutil.copy2(CONFIG, backup)
+        what += f" (old one in {tilde(backup)})"
+    os.makedirs(SSH_DIR, mode=0o700, exist_ok=True)
+    tmp = CONFIG + ".ssh-add-host.tmp"
+    with open(tmp, "w") as f:
+        f.write("\n".join(lines).rstrip("\n") + "\n")
+    os.chmod(tmp, os.stat(CONFIG).st_mode & 0o777 if text else 0o600)
+    os.replace(tmp, CONFIG)
+    return what
+
+
+def verify(name):
+    r = run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10"] + NO_MUX + [name, "true"],
+            stdin=subprocess.DEVNULL, timeout=40)
+    if r.returncode != 0:
+        raise Fail(f"`ssh {name}` still can't get in without a password: {r.stderr.strip().splitlines()[-1] if r.stderr.strip() else r.returncode}", "verify")
+
+
+def cmd_scan(a):
+    g = ssh_g(a.host.split("@")[-1], a.port)
+    host, port = g.get("hostname", a.host), a.port or g.get("port", "22")
+    lines, fps = scan(host, port)
+    return {"ok": True, "known": is_known(g.get("hostkeyalias") or host, port), "fingerprints": fps}
+
+
+def cmd_setup(a, steps, say):
+    name = a.name
+    if not NAME_RE.match(name or ""):
+        raise Fail("The name may have letters, digits, dot, dash and underscore", "bad_name")
+    existing = find_host_block(open(CONFIG).read().splitlines() if os.path.exists(CONFIG) else [], name) is not None
+    target_spec = a.host or (name if existing else None)
+    if not target_spec:
+        raise Fail("Which host? --host [user@]host", "bad_host")
+    user = a.user
+    if "@" in target_spec:
+        user, target_spec = user or target_spec.rsplit("@", 1)[0], target_spec.rsplit("@", 1)[1]
+    g = ssh_g(target_spec, a.port, user)
+    host, port, user = g.get("hostname", target_spec), a.port or g.get("port", "22"), g.get("user", user or getpass.getuser())
+    keyname = g.get("hostkeyalias") or host
+
+    # 1. host key
+    if is_known(keyname, port):
+        say("host key", f"{known_key(keyname, port)} is in known_hosts")
+    else:
+        lines, fps = scan(host, port)
+        listed = ", ".join(f"{f['type']} {f['fingerprint']}" for f in fps)
+        if a.fingerprint:
+            if a.fingerprint not in {f["fingerprint"] for f in fps}:
+                raise Fail(f"{host}'s key changed since you looked: {listed}", "host_key_changed", fingerprints=fps)
+        elif sys.stdin.isatty() and not a.json:
+            print(f"{host}:{port} is new. Its keys:\n  " + "\n  ".join(f"{f['type']} {f['fingerprint']}" for f in fps))
+            if input("Trust it? [y/N] ").strip().lower() not in ("y", "yes"):
+                raise Fail("Not trusted", "host_key_unknown", fingerprints=fps)
+        else:
+            raise Fail(f"{host} is new: confirm its key", "host_key_unknown", fingerprints=fps)
+        lines = [known_key(keyname, port) + " " + l.split(" ", 1)[1] for l in lines]
+        os.makedirs(SSH_DIR, mode=0o700, exist_ok=True)
+        with open(os.path.join(SSH_DIR, "known_hosts"), "a") as f:
+            f.write("\n".join(lines) + "\n")
+        say("host key", f"trusted {listed}")
+
+    # 2. key
+    key_path, pub, made = ensure_key(name)
+    say("key", f"{'made' if made else 'using'} {tilde(key_path)}")
+
+    # 3. authorized_keys there
+    password = read_password(a.password_file)
+    if password is None:
+        if not sys.stdin.isatty():
+            raise Fail("No password: --password-file", "auth")
+        password = getpass.getpass(f"{user}@{host}'s password: ")
+    install_key(name if existing else host, port, user, password, pub)
+    say("authorized_keys", f"key added on {host}")
+
+    # 4. ~/.ssh/config
+    say("ssh config", write_config(name, host, user, port, key_path))
+
+    # 5. check
+    verify(name)
+    say("check", f"ssh {name} gets in without a password")
+
+    if a.add_machine:
+        r = run(["hc", "machine", "add", name])
+        if r.returncode != 0:
+            raise Fail(f"hc machine add {name}: {(r.stderr or r.stdout).strip()}", "hc")
+        say("herdr", f"added machine {name}")
+    return {"ok": True, "name": name}
+
+
+def main():
+    p = argparse.ArgumentParser(prog="ssh-add-host", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--json", action="store_true", help="one JSON object on stdout")
+    sub = p.add_subparsers(dest="cmd", required=True)
+    s = sub.add_parser("scan")
+    s.add_argument("host")
+    s.add_argument("-p", "--port", type=int)
+    s = sub.add_parser("setup")
+    s.add_argument("--name", required=True)
+    s.add_argument("--host")
+    s.add_argument("--user")
+    s.add_argument("-p", "--port", type=int)
+    s.add_argument("--password-file")
+    s.add_argument("--fingerprint")
+    s.add_argument("--add-machine", action="store_true")
+    a = p.parse_args()
+
+    steps = []
+
+    def say(step, text):
+        steps.append({"step": step, "text": text})
+        if not a.json:
+            print(f"✓ {step}: {text}")
+
+    try:
+        out = cmd_scan(a) if a.cmd == "scan" else cmd_setup(a, steps, say)
+        code = 0
+    except Fail as e:
+        out = {"ok": False, "error": e.text, "kind": e.kind, **e.extra}
+        code = 1
+    except subprocess.TimeoutExpired as e:
+        out = {"ok": False, "error": f"{e.cmd[0]} took too long", "kind": "timeout"}
+        code = 1
+    finally:
+        if a.cmd == "setup" and a.password_file and os.path.exists(a.password_file):
+            read_password(a.password_file)
+    out["steps"] = steps
+    if a.json:
+        print(json.dumps(out, ensure_ascii=False))
+    elif not out["ok"]:
+        print(f"✗ {out['error']}", file=sys.stderr)
+    elif a.cmd == "scan":
+        print(("known" if out["known"] else "new") + ": " + ", ".join(f"{f['type']} {f['fingerprint']}" for f in out["fingerprints"]))
+    sys.exit(code)
+
+
+if __name__ == "__main__":
+    main()

@@ -19,7 +19,7 @@ git checkout -t origin/main
 
 `install.sh` можно запускать сколько угодно раз, существующие файлы он не трогает. Что он делает:
 
-- ставит ссылки `~/.local/bin/herdr-task` и `~/.local/bin/ssh-browser` на скрипты из `bin/`;
+- ставит ссылки `~/.local/bin/herdr-task`, `~/.local/bin/ssh-browser` и `~/.local/bin/ssh-add-host` на скрипты из `bin/`;
 - ставит ссылки на темы Claude Code из `claude-themes/` в `~/.claude/themes/`;
 - создаёт из примеров свои настройки: `programs.json`, `mods/tasks/config.json`, `~/.config/ssh-browser/config`;
 - проверяет, есть ли программы, которые нужны модам (`python3`, `git`, `node`, `mmdc`, `sips`, `claude`, `codex`).
@@ -34,6 +34,7 @@ git checkout -t origin/main
 - `mods/`: моды, таблица ниже.
 - `bin/herdr-task`: задачи для команды агентов, на нём работает мод Tasks.
 - `bin/ssh-browser`: Chrome, который ходит на выбранные сайты через SSH-туннель.
+- `bin/ssh-add-host`: вход на машину по ключу вместо пароля, на нём работает диалог Add machine.
 - `themes/whitby-*.json`: светлая и тёмная темы окна из [herdr-whitby](https://github.com/shellscape/herdr-whitby). `themes/atom-one-dark.json`: палитра One Dark.
 - `claude-themes/whitby-*.json`: темы Claude Code в цветах Whitby (`"theme": "custom:whitby-light"` в `~/.claude/settings.json`).
 - `keys.json`, `settings.json`: клавиши и настройки окна. `minimum_contrast: 2` нужен светлой теме, иначе бледный текст агентов на белом фоне не виден.
@@ -44,7 +45,7 @@ git checkout -t origin/main
 
 | Место | Мод |
 |---|---|
-| Сайдбар | `space-folders`: спейсы по папкам |
+| Сайдбар | `space-folders`: спейсы по папкам; сверху и снизу `workspace-chrome-plus` (Settings, Add machine) |
 | Колонка слева | `file-preview` с `mode: "tree"`: Explorer |
 | Панель вкладок | `tabs-plus`: вкладки и кнопки Explorer, Tasks (и MRs, Worklog, если эти моды установлены) |
 | Статус-бар слева | `workspace-status-plus`: машина спейса и состояние связи с ней |
@@ -64,6 +65,8 @@ git checkout -t origin/main
 | `tabs-plus` | клон встроенного `tabs` | Кнопки Explorer, Tasks, MRs, Worklog; спрятанные вкладки не показываются |
 | `new-menu-plus` | клон встроенного `new-menu` | Меню «+» без встроенных Claude Code и Codex: остаются свои обёртки из `programs.json` |
 | `workspace-status-plus` | клон встроенного `workspace-status` | Состояние связи с машиной спейса и ↻ Reconnect |
+| `machine-add-plus` | клон встроенного `machine-add` | Диалог Add machine с галочкой «Make a key and log in without a password», см. «Новая машина по ключу» |
+| `workspace-chrome-plus` | клон встроенного `workspace-chrome` | Шапка и низ сайдбара; Add machine открывает `machine-add-plus` |
 | `conn-details` | свой | Полный текст последней ошибки связи: Copy, ↻ Reconnect |
 | `tasks` | свой | Задачи для команды агентов, доска YouTrack |
 | `ssh-browser` | свой | Состояние `ssh-browser` в статус-баре |
@@ -105,6 +108,19 @@ git checkout -t origin/main
 - `ssh-browser [url]` открывает профиль и поднимает туннель (`ssh -D`), туннель живёт, пока профиль открыт.
 - `--status` печатает `off`, `down`, `nocorp` (туннель есть, а проверочная страница не отвечает) или `up`; `--tunnel` поднимает лежащий туннель, `--reconnect` переподнимает.
 - Мод `ssh-browser` в статус-баре раз в 15 секунд спрашивает `--status`, сам поднимает упавший туннель и по клику чинит или открывает браузер.
+
+### Новая машина по ключу
+
+Add machine внизу сайдбара открывает диалог `machine-add-plus`. Это встроенный диалог Herdr, в который добавлен вход по ключу: пароль вводится один раз, дальше `ssh` и Herdr ходят на машину без него.
+
+- Поставь галочку «Make a key and log in without a password» под полем `user@host`, введи пароль, при нужде порт и имя (по умолчанию первая часть адреса) и нажми Add.
+- Если хост из `~/.ssh/config` при добавлении просит пароль, поле для пароля появляется прямо под его строкой.
+- Если этот компьютер ещё не видел машину, диалог показывает отпечатки её ключа хоста и ждёт «Trust and continue». Сверить их можно с `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` на самой машине.
+- Дальше работает `bin/ssh-add-host setup`: кладёт ключ хоста в `~/.ssh/known_hosts`, создаёт `~/.ssh/keys/id_ed25519_<имя>` (или `~/.ssh/`, если папки `keys` нет; готовый ключ с таким именем берётся как есть), входит по паролю и дописывает публичный ключ в `~/.ssh/authorized_keys` на машине (один раз, с правами 700/600), добавляет `Host <имя>` с `IdentityFile` и `IdentitiesOnly yes` в `~/.ssh/config` перед первым `Host` (у хоста, который уже есть в конфиге, добавляется только `IdentityFile`), проверяет `ssh -o BatchMode=yes <имя> true`. После этого машина добавляется в Herdr, как обычно (`hc machine add <имя>`).
+- Перед правкой `~/.ssh/config` старая версия копируется в `~/.backups/ssh-config-before-ssh-add-host-<дата>`.
+- Пароль нигде не сохраняется. Диалог пишет его во временную папку с правами 700, скрипт сразу удаляет файл и отдаёт пароль `ssh` через переменную окружения своего помощника `SSH_ASKPASS` (`SSH_ASKPASS_REQUIRE=force`, OpenSSH 8.4+), так что `sshpass` не нужен.
+- Если машина пароли не принимает (`Permission denied (publickey)`), диалог так и пишет: ключ туда должен положить её администратор.
+- Из терминала: `ssh-add-host setup --name vps --host root@203.0.113.5 [-p 2222] [--add-machine]` спросит пароль и подтверждение ключа хоста сам; `ssh-add-host scan <хост>` показывает отпечатки.
 
 ## Настройка
 
@@ -183,7 +199,7 @@ YouTrack включается секцией `youtrack`:
 Моё в этом репозитории под MIT, см. `LICENSE`. У взятого чужого своя лицензия, текст лежит рядом:
 
 - `file-preview`, `file-preview-panel`, `space-folders`, `herdr-md`, `usage-limits`, `auto-title`: MIT, `LICENSE` в папке мода, с копирайтом автора.
-- `tabs-plus`, `new-menu-plus`, `workspace-status-plus`: клоны модов Herdr, Apache-2.0, `LICENSE` в папке мода, в начале `main.js` отмечено, что файл изменён.
+- `tabs-plus`, `new-menu-plus`, `workspace-status-plus`, `machine-add-plus`, `workspace-chrome-plus`: клоны модов Herdr, Apache-2.0, `LICENSE` в папке мода, в начале `main.js` отмечено, что файл изменён.
 - Темы Whitby (`themes/whitby-*.json`, `claude-themes/whitby-*.json`): MPL-2.0, `LICENSE-whitby` рядом.
 - `herdr-md/marked.js`: библиотека marked, её лицензия в `marked.LICENSE.md`.
 
@@ -192,6 +208,7 @@ YouTrack включается секцией `youtrack`:
 - [herdr.dev](https://herdr.dev): Herdr, его моды и раскладки; app и herdr-core под Apache-2.0 ([herdrdev/herdr-app](https://github.com/herdrdev/herdr-app)).
 - `AGENTS.md`, `herdr-app --skill`, `hc --skill`: устройство модов, команды `herdr-app do`, `hc exec`, `hc send`.
 - Репозитории модов из таблицы выше: исходный код и лицензии.
+- [ssh(1)](https://man.openbsd.org/ssh), [ssh-keyscan(1)](https://man.openbsd.org/ssh-keyscan): `SSH_ASKPASS_REQUIRE`, `-G`, формат `known_hosts`.
 - [shellscape/herdr-whitby](https://github.com/shellscape/herdr-whitby): темы, MPL-2.0.
 - [YouTrack REST API](https://www.jetbrains.com/help/youtrack/devportal/youtrack-rest-api.html): `/api/agiles`, `/api/issues`, `/api/issues/<KEY>/comments`, только чтение.
 - [youtrack-cli](https://pypi.org/project/youtrack-cli/): формат файла с токеном.

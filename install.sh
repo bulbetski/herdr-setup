@@ -24,6 +24,7 @@ seed() {
 echo "Scripts in ~/.local/bin:"
 link "$APP/bin/herdr-task" "$HOME/.local/bin/herdr-task"
 link "$APP/bin/ssh-browser" "$HOME/.local/bin/ssh-browser"
+link "$APP/bin/ssh-add-host" "$HOME/.local/bin/ssh-add-host"
 case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) warn "~/.local/bin is not in PATH" ;; esac
 
 echo "Claude Code themes in ~/.claude/themes:"
