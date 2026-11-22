@@ -20,6 +20,7 @@ git checkout -t origin/main
 `install.sh` можно запускать сколько угодно раз, существующие файлы он не трогает. Что он делает:
 
 - ставит ссылки `~/.local/bin/herdr-task`, `~/.local/bin/ssh-browser` и `~/.local/bin/ssh-add-host` на скрипты из `bin/`;
+- ставит ссылки на скилл `skills/herdr` в `~/.claude/skills/herdr` и `~/.agents/skills/herdr` (Codex);
 - ставит ссылки на темы Claude Code из `claude-themes/` в `~/.claude/themes/`;
 - создаёт из примеров свои настройки: `programs.json`, `mods/tasks/config.json`, `~/.config/ssh-browser/config`;
 - проверяет, есть ли программы, которые нужны модам (`python3`, `git`, `node`, `mmdc`, `sips`, `claude`, `codex`).
@@ -35,6 +36,7 @@ git checkout -t origin/main
 - `bin/herdr-task`: задачи для команды агентов, на нём работает мод Tasks.
 - `bin/ssh-browser`: Chrome, который ходит на выбранные сайты через SSH-туннель.
 - `bin/ssh-add-host`: вход на машину по ключу вместо пароля, на нём работает диалог Add machine.
+- `skills/herdr`: скилл для Claude Code и Codex. Агент читает справку `hc` и `herdr-app`, раздаёт задачи другим агентам через `hc run` и ждёт их отчёта, заводит задачи через `herdr-task`, меняет окно (раскладки, клавиши, моды).
 - `bin/agent-restart`: перезапуск Claude Code или Codex в терминале с тем же диалогом, на нём работает кнопка ↻ в панели вкладок.
 - `themes/whitby-*.json`: светлая и тёмная темы окна из [herdr-whitby](https://github.com/shellscape/herdr-whitby). `themes/atom-one-dark.json`: палитра One Dark.
 - `claude-themes/whitby-*.json`: темы Claude Code в цветах Whitby (`"theme": "custom:whitby-light"` в `~/.claude/settings.json`).

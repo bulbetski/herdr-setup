@@ -27,6 +27,10 @@ link "$APP/bin/ssh-browser" "$HOME/.local/bin/ssh-browser"
 link "$APP/bin/ssh-add-host" "$HOME/.local/bin/ssh-add-host"
 case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) warn "~/.local/bin is not in PATH" ;; esac
 
+echo "Agent skill (Claude Code, Codex):"
+link "$APP/skills/herdr" "$HOME/.claude/skills/herdr"
+link "$APP/skills/herdr" "$HOME/.agents/skills/herdr"
+
 echo "Claude Code themes in ~/.claude/themes:"
 for f in "$APP"/claude-themes/*.json; do link "$f" "$HOME/.claude/themes/$(basename "$f")"; done
 
