@@ -1,12 +1,13 @@
 import { View, div } from "gpui-kit";
 import { h_flex } from "gpui-base";
-import { appHome, exec, notify, readTextFile, shared, spaces, theme } from "herdr";
+import { appHome, exec, notify, readTextFile, run, shared, spaces, theme } from "herdr";
 
 // The proxy the agents of another machine go through (a VPN client listening on a local port there), in the
 // status bar: does it answer and does it reach the internet. A proxy that stopped listening is restarted on its
 // own; a click on a red or yellow state restarts it by hand, a click on green does nothing. The machine, the
 // proxy, the test URL and the restart commands are in config.json next to this file (see config.example.json);
 // with `folder` set it shows only while a space of that sidebar folder is active (it keeps checking unseen).
+const BLOCK = "proxy-status";  // its block in the layout
 const POLL = 30000;           // ms
 const AUTO_EVERY = 300000;    // ms, at most this often an automatic restart
 const AFTER_FIX = 10000;      // ms, the client needs a few seconds to bring its core up
@@ -20,11 +21,11 @@ const LOOK = {
 
 export default class ProxyStatus extends View {
   init(_props, cx) {
-    this.config = null; this.state = null; this.busy = false; this.lastAuto = 0;
+    this.config = null; this.state = null; this.busy = false; this.lastAuto = 0; this.ready = false; this.px = null;
     cx.spawn(async (cx) => {
       const text = await readTextFile(`${appHome()}/mods/proxy-status/config.json`).catch(() => null);
       try { this.config = text ? JSON.parse(text) : null; } catch { this.config = null; }
-      cx.notify();
+      this.ready = true; cx.notify();
       if (!this.config?.machine) return;
       this.poll(cx);
       cx.timer.every(POLL, (cx) => this.poll(cx));
@@ -72,15 +73,25 @@ export default class ProxyStatus extends View {
     return where?.groups.find((g) => g.id === where.of[id])?.name === folder;
   }
 
-  render() {
+  // The block takes the width of what it shows, so the status bar items sit side by side (0 while hidden).
+  // There is no text measuring here: about 7 px a character at this size, plus the dot and the padding.
+  fit(cx, text) {
+    const px = text ? 40 + Math.ceil(text.length * 7) : 0;
+    if (px === this.px) return;
+    this.px = px;
+    cx.timer.after(0, () => run("layout.resize", { id: BLOCK, px }));
+  }
+
+  render(cx) {
     const t = theme();
-    const bar = h_flex().id("proxy-status").size_full().px(10).gap(6).items_center().justify_end()
+    const bar = h_flex().id("proxy-status").size_full().pl(4).pr(12).gap(6).items_center().justify_end()
       .bg(t.chrome).border_t(1).border_color(t.border).text_size(11.8);
-    if (!this.config?.machine || !this.shown()) return bar;
+    if (!this.config?.machine || !this.shown()) { if (this.ready) this.fit(cx, ""); return bar; }
     const look = LOOK[this.state];
     const canFix = (this.state === "down" || this.state === "noexit") && this.config.fix?.length && !this.busy;
     const color = this.busy ? t.working : look ? t[look.color] : t.dim;
     const text = this.busy ? `${this.label} · restarting…` : `${this.label}${look?.text ?? ""}`;
+    this.fit(cx, text);
     return bar.child(h_flex().id("proxy-status-state").gap(6).items_center().px(4).rounded(4)
       .when(Boolean(look), (e) => e.tooltip(`${look.tip}\n${this.config.machine}: ${this.config.proxy}`))
       .when(Boolean(canFix), (e) => e.cursor_pointer().hover((s) => s.bg(t.hover)).on_click((_e, cx) => this.fix(false, cx)))

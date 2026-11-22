@@ -1,11 +1,12 @@
 import { View, div } from "gpui-kit";
 import { h_flex } from "gpui-base";
-import { exec, home, notify, shared, spaces, theme } from "herdr";
+import { exec, home, notify, run, shared, spaces, theme } from "herdr";
 
 // The ssh-browser Chrome profile (~/.local/bin/ssh-browser) in the status bar: is it open and does its
 // SSH tunnel work. A dead tunnel is raised again on its own; a click on a red or grey state fixes it by
 // hand, a click on green does nothing. The host, the domains and the name shown are in the script's config;
 // with FOLDER set there it shows only while a space of that sidebar folder is active (it keeps working unseen).
+const BLOCK = "ssh-browser"; // its block in the layout
 const POLL = 15000;        // ms
 const AUTO_EVERY = 30000;  // ms, at most this often an automatic reconnect
 
@@ -20,13 +21,14 @@ export default class SshBrowser extends View {
   init(_props, cx) {
     this.bin = `${home()}/.local/bin/ssh-browser`;
     this.label = "SSH browser";
-    this.folder = "";
+    this.folder = ""; this.ready = false; this.px = null;
     this.state = null; this.busy = null; this.lastAuto = 0;
     cx.spawn(async (cx) => {
       const r = await exec(this.bin, ["--label"], { timeout: 5000 }).catch(() => null);
       if (r?.code === 0 && r.stdout.trim()) { this.label = r.stdout.trim(); cx.notify(); }
       const f = await exec(this.bin, ["--folder"], { timeout: 5000 }).catch(() => null);
-      if (f?.code === 0 && f.stdout.trim()) { this.folder = f.stdout.trim(); cx.notify(); }
+      if (f?.code === 0 && f.stdout.trim()) this.folder = f.stdout.trim();
+      this.ready = true; cx.notify();
     });
     this.poll(cx);
     cx.timer.every(POLL, (cx) => this.poll(cx));
@@ -68,15 +70,25 @@ export default class SshBrowser extends View {
     return where?.groups.find((g) => g.id === where.of[id])?.name === this.folder;
   }
 
-  render() {
+  // The block takes the width of what it shows, so the status bar items sit side by side (0 while hidden).
+  // There is no text measuring here: about 7 px a character at this size, plus the dot and the padding.
+  fit(cx, text) {
+    const px = text ? 40 + Math.ceil(text.length * 7) : 0;
+    if (px === this.px) return;
+    this.px = px;
+    cx.timer.after(0, () => run("layout.resize", { id: BLOCK, px }));
+  }
+
+  render(cx) {
     const t = theme();
-    const bar = h_flex().id("ssh-browser").size_full().px(10).gap(6).items_center().justify_end()
+    const bar = h_flex().id("ssh-browser").size_full().pl(4).pr(12).gap(6).items_center().justify_end()
       .bg(t.chrome).border_t(1).border_color(t.border).text_size(11.8);
-    if (!this.shown()) return bar;
+    if (!this.ready || !this.shown()) { if (this.ready) this.fit(cx, ""); return bar; }
     const look = LOOK[this.state];
     const fix = { down: "--tunnel", nocorp: "--reconnect", off: "--open" }[this.state];
     const color = this.busy ? t.working : look ? t[look.color] : t.dim;
     const text = this.busy ? `${this.label} · ${this.busy}…` : `${this.label}${look?.text ?? ""}`;
+    this.fit(cx, text);
     return bar
       .child(h_flex().id("ssh-browser-state").gap(6).items_center().px(4).rounded(4)
         .when(Boolean(look), (e) => e.tooltip(look.tip))
