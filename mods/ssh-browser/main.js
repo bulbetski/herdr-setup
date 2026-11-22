@@ -1,10 +1,11 @@
 import { View, div } from "gpui-kit";
 import { h_flex } from "gpui-base";
-import { exec, home, notify, theme } from "herdr";
+import { exec, home, notify, shared, spaces, theme } from "herdr";
 
 // The ssh-browser Chrome profile (~/.local/bin/ssh-browser) in the status bar: is it open and does its
 // SSH tunnel work. A dead tunnel is raised again on its own; a click on a red or grey state fixes it by
-// hand, a click on green does nothing. The host, the domains and the name shown are in the script's config.
+// hand, a click on green does nothing. The host, the domains and the name shown are in the script's config;
+// with FOLDER set there it shows only while a space of that sidebar folder is active (it keeps working unseen).
 const POLL = 15000;        // ms
 const AUTO_EVERY = 30000;  // ms, at most this often an automatic reconnect
 
@@ -19,10 +20,13 @@ export default class SshBrowser extends View {
   init(_props, cx) {
     this.bin = `${home()}/.local/bin/ssh-browser`;
     this.label = "SSH browser";
+    this.folder = "";
     this.state = null; this.busy = null; this.lastAuto = 0;
     cx.spawn(async (cx) => {
       const r = await exec(this.bin, ["--label"], { timeout: 5000 }).catch(() => null);
       if (r?.code === 0 && r.stdout.trim()) { this.label = r.stdout.trim(); cx.notify(); }
+      const f = await exec(this.bin, ["--folder"], { timeout: 5000 }).catch(() => null);
+      if (f?.code === 0 && f.stdout.trim()) { this.folder = f.stdout.trim(); cx.notify(); }
     });
     this.poll(cx);
     cx.timer.every(POLL, (cx) => this.poll(cx));
@@ -57,14 +61,23 @@ export default class SshBrowser extends View {
     });
   }
 
+  // The active space is in the folder named `folder` of the sidebar (space-folders publishes where each space is).
+  shown() {
+    if (!this.folder) return true;
+    const where = shared("space-folders.placed"), id = spaces().find((s) => s.active)?.id;
+    return where?.groups.find((g) => g.id === where.of[id])?.name === this.folder;
+  }
+
   render() {
     const t = theme();
+    const bar = h_flex().id("ssh-browser").size_full().px(10).gap(6).items_center().justify_end()
+      .bg(t.chrome).border_t(1).border_color(t.border).text_size(11.8);
+    if (!this.shown()) return bar;
     const look = LOOK[this.state];
     const fix = { down: "--tunnel", nocorp: "--reconnect", off: "--open" }[this.state];
     const color = this.busy ? t.working : look ? t[look.color] : t.dim;
     const text = this.busy ? `${this.label} · ${this.busy}…` : `${this.label}${look?.text ?? ""}`;
-    return h_flex().id("ssh-browser").size_full().px(10).gap(6).items_center().justify_end()
-      .bg(t.chrome).border_t(1).border_color(t.border).text_size(11.8)
+    return bar
       .child(h_flex().id("ssh-browser-state").gap(6).items_center().px(4).rounded(4)
         .when(Boolean(look), (e) => e.tooltip(look.tip))
         .when(Boolean(fix) && !this.busy, (e) => e.cursor_pointer().hover((s) => s.bg(t.hover))

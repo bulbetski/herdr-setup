@@ -8,23 +8,25 @@
 #   ssh-browser --reconnect  close the tunnel and raise it again (it is up, but the private sites don't answer)
 #   ssh-browser --status     print off | down | nocorp | up; closes a tunnel left after Cmd+Q
 #   ssh-browser --label      print the name the status bar shows
+#   ssh-browser --folder     print the sidebar folder the status bar shows it in (empty: everywhere)
 #
 # Settings: ~/.config/ssh-browser/config (a shell file, see ssh-browser.example.conf next to this script),
 # or the file named by SSH_BROWSER_CONFIG. The ssh-browser mod in Herdr's status bar uses
-# --label, --status, --tunnel and --reconnect.
+# --label, --folder, --status, --tunnel and --reconnect.
 set -euo pipefail
 
 # Herdr's hc exec kills what it started by HC_SCOPE; the tunnel and Chrome must outlive the caller.
 unset HC_SCOPE
 
 conf="${SSH_BROWSER_CONFIG:-$HOME/.config/ssh-browser/config}"
-SSH_HOST="" LABEL="" DOMAINS="" SUBNETS="" PROBE_URL="" FALLBACK="DIRECT" PORT=1081 PROFILE="" CTL=""
+SSH_HOST="" LABEL="" FOLDER="" DOMAINS="" SUBNETS="" PROBE_URL="" FALLBACK="DIRECT" PORT=1081 PROFILE="" CTL=""
 CHROME="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 # shellcheck disable=SC1090
 [ -f "$conf" ] && . "$conf"
 if [ -z "$SSH_HOST" ]; then
   [ "${1:-}" = --status ] && { echo off; exit 0; }
   [ "${1:-}" = --label ] && { echo "SSH browser"; exit 0; }
+  [ "${1:-}" = --folder ] && { echo; exit 0; }
   echo "ssh-browser: no SSH_HOST in $conf" >&2; exit 1
 fi
 LABEL="${LABEL:-$SSH_HOST browser}"
@@ -61,6 +63,8 @@ tunnel_up() {
 case "${1:-}" in
   --label)
     echo "$LABEL"; exit 0 ;;
+  --folder)
+    echo "$FOLDER"; exit 0 ;;
   --status)
     if ! running; then
       # Older than a minute, so a tunnel raised for a Chrome that is still starting is left alone.
