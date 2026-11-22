@@ -1,37 +1,43 @@
 import { View, div } from "gpui-kit";
-import { h_flex } from "gpui-base";
-import { exec, home, notify, run, shared, spaces, theme } from "herdr";
+import { exec, home, nextCommand, notify, setShared } from "herdr";
 
-// The ssh-browser Chrome profile (~/.local/bin/ssh-browser) in the status bar: is it open and does its
-// SSH tunnel work. A dead tunnel is raised again on its own; a click on a red or grey state fixes it by
-// hand, a click on green does nothing. The host, the domains and the name shown are in the script's config;
-// with FOLDER set there it shows only while a space of that sidebar folder is active (it keeps working unseen).
-const BLOCK = "ssh-browser"; // its block in the layout
+// The ssh-browser Chrome profile (~/.local/bin/ssh-browser): is it open and does its SSH tunnel work.
+// It draws nothing itself (its layout block is 0 px wide): it publishes the state in shared "machine-extras.browser"
+// and workspace-status-plus shows it in the status card of the machine SSH_HOST names. A dead tunnel is raised
+// again on its own; the card's button sends "ssh-browser.fix", which raises, reconnects or opens it.
 const POLL = 15000;        // ms
 const AUTO_EVERY = 30000;  // ms, at most this often an automatic reconnect
+const KEY = "machine-extras.browser";
 
 const LOOK = {
-  up: { color: "ansi2", text: "", tip: "The browser is open, private sites go through the tunnel" },
-  down: { color: "ansi1", text: " · tunnel down", tip: "The tunnel is down. Click to raise it again" },
-  nocorp: { color: "ansi3", text: " · no access", tip: "The tunnel is up, but the private sites don't answer. Click to reconnect; if it stays, check the network on the remote machine" },
-  off: { color: "dim", text: " · off", tip: "The browser is closed. Click to open it" },
+  up: { level: "ok", text: "open", tip: "The browser is open, private sites go through the tunnel" },
+  down: { level: "bad", text: "tunnel down", tip: "The tunnel is down", fix: "Raise tunnel" },
+  nocorp: { level: "warn", text: "no access", tip: "The tunnel is up, but the private sites don't answer; if a reconnect doesn't help, check the network on the remote machine", fix: "Reconnect" },
+  off: { level: "off", text: "closed", tip: "The browser is closed", fix: "Open" },
 };
+const ARG = { down: "--tunnel", nocorp: "--reconnect", off: "--open" };
 
 export default class SshBrowser extends View {
   init(_props, cx) {
     this.bin = `${home()}/.local/bin/ssh-browser`;
-    this.label = "SSH browser";
-    this.folder = ""; this.ready = false; this.px = null;
+    this.label = "SSH browser"; this.host = "";
     this.state = null; this.busy = null; this.lastAuto = 0;
     cx.spawn(async (cx) => {
-      const r = await exec(this.bin, ["--label"], { timeout: 5000 }).catch(() => null);
-      if (r?.code === 0 && r.stdout.trim()) { this.label = r.stdout.trim(); cx.notify(); }
-      const f = await exec(this.bin, ["--folder"], { timeout: 5000 }).catch(() => null);
-      if (f?.code === 0 && f.stdout.trim()) this.folder = f.stdout.trim();
-      this.ready = true; cx.notify();
+      const [l, h] = await Promise.all(["--label", "--host"].map((a) => exec(this.bin, [a], { timeout: 5000 }).catch(() => null)));
+      if (l?.code === 0 && l.stdout.trim()) this.label = l.stdout.trim();
+      if (h?.code === 0) this.host = h.stdout.trim();
+      this.poll(cx);
     });
-    this.poll(cx);
     cx.timer.every(POLL, (cx) => this.poll(cx));
+    cx.spawn(async (cx) => { for (;;) { const c = await nextCommand(); if (c === "fix" && ARG[this.state]) this.act(ARG[this.state], false, cx); } });
+  }
+
+  publish() {
+    if (!this.host) return;
+    const look = LOOK[this.state];
+    setShared(KEY, { machine: this.host, name: "Browser", mod: "ssh-browser", at: Date.now(),
+      level: this.busy ? "busy" : look?.level ?? "off", text: this.busy ? `${this.busy}…` : look?.text ?? "checking…",
+      tip: look?.tip ?? "", fix: this.busy ? null : look?.fix ?? null });
   }
 
   poll(cx) {
@@ -40,7 +46,7 @@ export default class SshBrowser extends View {
       const r = await exec(this.bin, ["--status"], { timeout: 20000 }).catch(() => null);
       const s = r?.stdout.trim();
       this.state = LOOK[s] ? s : null;
-      cx.notify();
+      this.publish();
       if (s === "down" && Date.now() - this.lastAuto > AUTO_EVERY) {
         this.lastAuto = Date.now();
         this.act("--tunnel", true, cx);
@@ -52,7 +58,7 @@ export default class SshBrowser extends View {
   act(arg, auto, cx) {
     if (this.busy) return;
     this.busy = arg === "--open" ? "opening" : "connecting";
-    cx.notify();
+    this.publish();
     cx.spawn(async (cx) => {
       const r = await exec(this.bin, arg === "--open" ? [] : [arg], { timeout: 30000 })
         .catch((e) => ({ code: 1, stderr: String(e?.message ?? e) }));
@@ -63,38 +69,5 @@ export default class SshBrowser extends View {
     });
   }
 
-  // The active space is in the folder named `folder` of the sidebar (space-folders publishes where each space is).
-  shown() {
-    if (!this.folder) return true;
-    const where = shared("space-folders.placed"), id = spaces().find((s) => s.active)?.id;
-    return where?.groups.find((g) => g.id === where.of[id])?.name === this.folder;
-  }
-
-  // The block takes the width of what it shows, so the status bar items sit side by side (0 while hidden).
-  // There is no text measuring here: about 7 px a character at this size, plus the dot and the padding.
-  fit(cx, text) {
-    const px = text ? 40 + Math.ceil(text.length * 7) : 0;
-    if (px === this.px) return;
-    this.px = px;
-    cx.timer.after(0, () => run("layout.resize", { id: BLOCK, px }));
-  }
-
-  render(cx) {
-    const t = theme();
-    const bar = h_flex().id("ssh-browser").size_full().pl(4).pr(12).gap(6).items_center().justify_end()
-      .bg(t.chrome).border_t(1).border_color(t.border).text_size(11.8);
-    if (!this.ready || !this.shown()) { if (this.ready) this.fit(cx, ""); return bar; }
-    const look = LOOK[this.state];
-    const fix = { down: "--tunnel", nocorp: "--reconnect", off: "--open" }[this.state];
-    const color = this.busy ? t.working : look ? t[look.color] : t.dim;
-    const text = this.busy ? `${this.label} · ${this.busy}…` : `${this.label}${look?.text ?? ""}`;
-    this.fit(cx, text);
-    return bar
-      .child(h_flex().id("ssh-browser-state").gap(6).items_center().px(4).rounded(4)
-        .when(Boolean(look), (e) => e.tooltip(look.tip))
-        .when(Boolean(fix) && !this.busy, (e) => e.cursor_pointer().hover((s) => s.bg(t.hover))
-          .on_click((_e, cx) => this.act(fix, false, cx)))
-        .child(div().size(7).rounded(4).flex_none().bg(color))
-        .child(div().text_color(this.state === "up" && !this.busy ? t.muted : color).child(text)));
-  }
+  render() { return div(); }
 }
