@@ -25,7 +25,14 @@ echo "Scripts in ~/.local/bin:"
 link "$APP/bin/herdr-task" "$HOME/.local/bin/herdr-task"
 link "$APP/bin/ssh-browser" "$HOME/.local/bin/ssh-browser"
 link "$APP/bin/ssh-add-host" "$HOME/.local/bin/ssh-add-host"
+link "$APP/bin/link-router" "$HOME/.local/bin/link-router"
 case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) warn "~/.local/bin is not in PATH" ;; esac
+
+echo "Link Router (macOS default browser that sends ssh-browser domains to ssh-browser):"
+if [ "$(uname)" = Darwin ] && [ -f "$HOME/.config/ssh-browser/config" ]; then
+  if [ -d "$HOME/Applications/Link Router.app" ]; then ok "~/Applications/Link Router.app"
+  else "$APP/bin/link-router" --install >/dev/null && ok "~/Applications/Link Router.app (make it the default: link-router --default)"; fi
+else skip "no ~/.config/ssh-browser/config yet"; fi
 
 echo "Agent skill (Claude Code, Codex):"
 link "$APP/skills/herdr" "$HOME/.claude/skills/herdr"

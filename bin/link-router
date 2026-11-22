@@ -1,0 +1,135 @@
+#!/usr/bin/env bash
+# A default browser for macOS that sends each link where it opens: links on the ssh-browser domains and
+# subnets (DOMAINS, SUBNETS in its config) to `ssh-browser <url>`, everything else to the usual browser.
+# Nothing to install: the app is an AppleScript applet built with the system's own tools.
+#
+#   link-router <url>...        open each URL where it belongs
+#   link-router --which <url>   print ssh-browser or browser, open nothing
+#   link-router --install      build ~/Applications/Link Router.app (again, if it is there)
+#   link-router --default       ask macOS to make Link Router the default browser (it asks you to confirm)
+#   link-router --restore       make the usual browser the default again
+#
+# Settings: ~/.config/ssh-browser/config (or SSH_BROWSER_CONFIG), the same file ssh-browser reads.
+# ROUTER_BROWSER there is the usual browser's app name (default "Google Chrome"). Log: ~/Library/Logs/link-router.log
+set -uo pipefail
+
+conf="${SSH_BROWSER_CONFIG:-$HOME/.config/ssh-browser/config}"
+DOMAINS="" SUBNETS="" ROUTER_BROWSER="Google Chrome"
+# shellcheck disable=SC1090
+[ -f "$conf" ] && . "$conf"
+APPDIR="$HOME/Applications/Link Router.app"
+BUNDLE_ID="local.link-router"
+LOG="$HOME/Library/Logs/link-router.log"
+log() { printf '%s %s\n' "$(date '+%F %T')" "$*" >>"$LOG"; }
+
+# The host of a URL: no scheme, user, port or path; lowercase.
+host_of() {
+  local h="${1#*://}"
+  [ "$h" = "$1" ] && { echo ""; return; }
+  h="${h%%[/?#]*}"; h="${h##*@}"; h="${h%:*}"
+  printf '%s' "$h" | tr '[:upper:]' '[:lower:]'
+}
+
+ip_num() { local IFS=.; set -- $1; echo $(( ($1 << 24) + ($2 << 16) + ($3 << 8) + $4 )); }
+
+# ssh-browser or browser for a URL.
+which_for() {
+  local host d n addr mask
+  host=$(host_of "$1")
+  [ -n "$host" ] || { echo browser; return; }
+  for d in $DOMAINS; do
+    d=$(printf '%s' "$d" | tr '[:upper:]' '[:lower:]')
+    case "$host" in "$d"|*."$d") echo ssh-browser; return ;; esac
+  done
+  if [[ "$host" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    for n in $SUBNETS; do
+      addr=$(ip_num "${n%/*}"); mask=$(ip_num "${n#*/}")
+      (( ($(ip_num "$host") & mask) == (addr & mask) )) && { echo ssh-browser; return; }
+    done
+  fi
+  echo browser
+}
+
+# The usual browser. -n starts a new process even when one runs; Chrome hands the URL to the running one with
+# the same (default) profile and exits, so a running ssh-browser Chrome never gets it.
+open_browser() { open -n -a "$ROUTER_BROWSER" --args "$@"; }
+
+open_one() {
+  local url="$1" where
+  where=$(which_for "$url")
+  log "$where $url"
+  if [ "$where" = ssh-browser ]; then
+    local err
+    if ! err=$("$HOME/.local/bin/ssh-browser" "$url" 2>&1 >/dev/null); then
+      log "ssh-browser failed: $err"
+      osascript -e 'on run argv' -e 'display notification (item 1 of argv) with title "Link Router"' -e 'end run' \
+        "$(printf '%s' "${err:-ssh-browser failed}" | tail -1 | cut -c1-200)" >/dev/null 2>&1 || true
+    fi
+  else
+    open_browser "$url" || log "open $ROUTER_BROWSER failed"
+  fi
+}
+
+install_app() {
+  local src tmp plist
+  tmp=$(mktemp -d)
+  src="$tmp/router.applescript"
+  cat >"$src" <<'EOF'
+-- Link Router: hands every link and HTML file macOS gives it to ~/.local/bin/link-router.
+on open location theURL
+	do shell script "\"$HOME/.local/bin/link-router\" " & quoted form of theURL & " >/dev/null 2>&1 &"
+end open location
+
+on open theFiles
+	repeat with f in theFiles
+		do shell script "\"$HOME/.local/bin/link-router\" " & quoted form of ("file://" & POSIX path of f) & " >/dev/null 2>&1 &"
+	end repeat
+end open
+
+on run
+end run
+EOF
+  mkdir -p "$HOME/Applications"
+  [ -d "$APPDIR" ] && rm -rf "$APPDIR"
+  osacompile -o "$APPDIR" "$src" || { rm -rf "$tmp"; return 1; }
+  rm -rf "$tmp"
+  plist="$APPDIR/Contents/Info.plist"
+  pb() { /usr/libexec/PlistBuddy -c "$1" "$plist" >/dev/null 2>&1; }
+  pb "Set :CFBundleIdentifier $BUNDLE_ID" || pb "Add :CFBundleIdentifier string $BUNDLE_ID"
+  pb "Set :CFBundleName Link Router" || pb "Add :CFBundleName string Link Router"
+  pb "Add :LSUIElement bool true"
+  pb "Delete :CFBundleURLTypes"
+  pb "Add :CFBundleURLTypes array"
+  pb "Add :CFBundleURLTypes:0 dict"
+  pb "Add :CFBundleURLTypes:0:CFBundleURLName string Web site URL"
+  pb "Add :CFBundleURLTypes:0:CFBundleURLSchemes array"
+  pb "Add :CFBundleURLTypes:0:CFBundleURLSchemes:0 string http"
+  pb "Add :CFBundleURLTypes:0:CFBundleURLSchemes:1 string https"
+  pb "Delete :CFBundleDocumentTypes"
+  pb "Add :CFBundleDocumentTypes array"
+  pb "Add :CFBundleDocumentTypes:0 dict"
+  pb "Add :CFBundleDocumentTypes:0:CFBundleTypeName string HTML document"
+  pb "Add :CFBundleDocumentTypes:0:CFBundleTypeRole string Viewer"
+  pb "Add :CFBundleDocumentTypes:0:LSItemContentTypes array"
+  pb "Add :CFBundleDocumentTypes:0:LSItemContentTypes:0 string public.html"
+  pb "Add :CFBundleDocumentTypes:0:LSItemContentTypes:1 string public.xhtml"
+  codesign --force --deep -s - "$APPDIR" >/dev/null 2>&1 || echo "link-router: codesign failed" >&2
+  /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$APPDIR"
+  echo "$APPDIR"
+}
+
+# LSSetDefaultHandlerForURLScheme for http and https; macOS asks the person to confirm the change.
+set_default() {
+  local id="$1"
+  osascript -l JavaScript -e "ObjC.import('CoreServices');
+    ['http','https'].map(s => \$.LSSetDefaultHandlerForURLScheme(\$(s), \$('$id'))).join(' ')"
+}
+
+case "${1:-}" in
+  "") echo "usage: link-router <url>... | --which <url> | --install | --default | --restore" >&2; exit 2 ;;
+  --which) which_for "${2:?url}" ;;
+  --install) install_app ;;
+  --default) [ -d "$APPDIR" ] || install_app >/dev/null; set_default "$BUNDLE_ID" ;;
+  --restore) set_default "$(osascript -e "id of app \"$ROUTER_BROWSER\"")" ;;
+  *) for u in "$@"; do open_one "$u"; done ;;
+esac

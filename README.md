@@ -19,7 +19,8 @@ git checkout -t origin/main
 
 `install.sh` можно запускать сколько угодно раз, существующие файлы он не трогает. Что он делает:
 
-- ставит ссылки `~/.local/bin/herdr-task`, `~/.local/bin/ssh-browser` и `~/.local/bin/ssh-add-host` на скрипты из `bin/`;
+- ставит ссылки `~/.local/bin/herdr-task`, `~/.local/bin/ssh-browser`, `~/.local/bin/ssh-add-host` и `~/.local/bin/link-router` на скрипты из `bin/`;
+- на macOS, если уже есть `~/.config/ssh-browser/config`, собирает `~/Applications/Link Router.app` (браузером по умолчанию его делает `link-router --default`);
 - ставит ссылки на скилл `skills/herdr` в `~/.claude/skills/herdr` и `~/.agents/skills/herdr` (Codex);
 - ставит ссылки на темы Claude Code из `claude-themes/` в `~/.claude/themes/`;
 - создаёт из примеров свои настройки: `programs.json`, `mods/tasks/config.json`, `~/.config/ssh-browser/config`;
@@ -35,6 +36,7 @@ git checkout -t origin/main
 - `mods/`: моды, таблица ниже.
 - `bin/herdr-task`: задачи для команды агентов, на нём работает мод Tasks.
 - `bin/ssh-browser`: Chrome, который ходит на выбранные сайты через SSH-туннель.
+- `bin/link-router`: браузер по умолчанию для macOS, который отправляет ссылки на домены `ssh-browser` в него, а остальные в обычный браузер.
 - `bin/ssh-add-host`: вход на машину по ключу вместо пароля, на нём работает диалог Add machine.
 - `skills/herdr`: скилл для Claude Code и Codex. Агент читает справку `hc` и `herdr-app`, раздаёт задачи другим агентам через `hc run` и ждёт их отчёта, заводит задачи через `herdr-task`, меняет окно (раскладки, клавиши, моды).
 - `bin/agent-restart`: перезапуск Claude Code или Codex в терминале с тем же диалогом, на нём работает кнопка ↻ в панели вкладок.
@@ -114,6 +116,16 @@ git checkout -t origin/main
 - `ssh-browser [url]` открывает профиль и поднимает туннель (`ssh -D`), туннель живёт, пока профиль открыт.
 - `--status` печатает `off`, `down`, `nocorp` (туннель есть, а проверочная страница не отвечает) или `up`; `--tunnel` поднимает лежащий туннель, `--reconnect` переподнимает.
 - Мод `ssh-browser` раз в 15 секунд спрашивает `--status` и сам поднимает упавший туннель. Состояние он показывает строкой Browser в карточке машины `SSH_HOST` (см. «Карточка машины»), там же кнопка, которая чинит или открывает браузер.
+
+### Link Router
+
+Ссылка из терминала Herdr (Cmd-клик), из мессенджера или письма открывается в браузере по умолчанию, и внутренний сайт попадал в обычный Chrome, где он не открывается. Link Router встаёт браузером по умолчанию и раскладывает ссылки сам: хост из `DOMAINS` (с поддоменами) или IP из `SUBNETS` настройки `ssh-browser` уходит в `ssh-browser <url>`, всё остальное в обычный браузер. Решает только хост, путь не важен. Сторонних программ не нужно.
+
+- `~/Applications/Link Router.app` это апплет AppleScript, собранный `osacompile`; в его `Info.plist` прописаны `http`, `https` и HTML-файлы, без иконки в Dock. Он только передаёт ссылку скрипту `~/.local/bin/link-router`.
+- `link-router --install` собирает приложение заново, `--default` делает его браузером по умолчанию (macOS просит подтвердить), `--restore` возвращает обычный браузер. Вернуть руками: System Settings → Desktop & Dock → Default web browser.
+- `link-router --which <url>` печатает `ssh-browser` или `browser` и ничего не открывает. Каждая ссылка пишется в `~/Library/Logs/link-router.log`.
+- Обычный браузер задаёт `ROUTER_BROWSER` в настройке `ssh-browser` (по умолчанию `Google Chrome`). Он открывается через `open -n -a <браузер> --args <url>`: Chrome отдаёт ссылку уже запущенному окну со своим профилем, так что окно `ssh-browser` (тоже Chrome, но с другой папкой профиля) её не перехватит.
+- Если `ssh-browser` не смог поднять туннель, ссылка не открывается, а macOS показывает уведомление с ошибкой.
 
 ### proxy-status
 
@@ -207,7 +219,7 @@ YouTrack включается секцией `youtrack`:
 
 ### `~/.config/ssh-browser/config`
 
-Пример в `bin/ssh-browser.example.conf`: SSH-хост из `~/.ssh/config`, подпись в статус-баре, домены и подсети для туннеля, проверочная страница, куда отправлять остальное (`DIRECT` или локальный прокси), порт и имя профиля Chrome.
+Пример в `bin/ssh-browser.example.conf`: SSH-хост из `~/.ssh/config`, подпись в статус-баре, домены и подсети для туннеля, проверочная страница, куда отправлять остальное (`DIRECT` или локальный прокси), порт и имя профиля Chrome. Этот же файл читает `link-router`, `ROUTER_BROWSER` там необязателен.
 
 ### `programs.json`
 
