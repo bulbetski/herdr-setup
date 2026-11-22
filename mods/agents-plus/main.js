@@ -1,5 +1,5 @@
 // Modified from Herdr's built-in `agents` mod (github.com/herdrdev/herdr-app, Apache-2.0, see LICENSE here).
-// Changed: a third sort, "Grouped by folder": the sidebar's folders (space-folders publishes where each
+// Changed: a third sort, the default, "Grouped by folder": the sidebar's folders (space-folders publishes where each
 // space sits), each with its own Needs you / Done / Working / Idle sections.
 // Agents in grouped or priority views; parents take their most urgent sub-agent's place.
 
@@ -64,7 +64,9 @@ const SORTS = [
 // Where space-folders put each space: { groups: [{ id, name, color }], of: { spaceId: groupId } }.
 const placed = () => shared("space-folders.placed") ?? { groups: [], of: {} };
 const OTHER = { id: "other", name: "Other", color: null };
-const sortOf = () => SORTS.find((s) => s.id === shared("agents.sort")) ?? SORTS[0];
+// Its own key, so the built-in mod's saved choice doesn't override the default here: by folder.
+const SORT_KEY = "agents-plus.sort";
+const sortOf = () => SORTS.find((s) => s.id === shared(SORT_KEY)) ?? SORTS.find((s) => s.id === "folders");
 const SECTION = { 4: "Needs you", 3: "Done", 2: "Working", 1: "Idle" };
 const SECTION_STATUS = { 4: "blocked", 3: "done", 2: "working" };
 
@@ -157,7 +159,7 @@ export default class Agents extends View {
         .text_color(t.foreground)
         .hover((el) => el.bg(t.hover))
         .on_click(() => {
-          setShared("agents.sort", s.id);
+          setShared(SORT_KEY, s.id);
           closeOverlay(props().overlay);
         })
         .child(svg(`mods/workspace-chrome/${s.icon}.svg`).size(14).flex_none().text_color(t.muted))

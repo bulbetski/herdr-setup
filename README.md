@@ -64,7 +64,7 @@ git checkout -t origin/main
 | `usage-limits` | [nozikov/herdr-usage-limits](https://github.com/nozikov/herdr-usage-limits), без правок | Лимиты Claude и Codex |
 | `auto-title` | [kryptamine/herdr-auto-title](https://github.com/kryptamine/herdr-auto-title), без правок | Называет вкладки по тому, что в них происходит; свой сервис ставится из его окна |
 | `tabs-plus` | клон встроенного `tabs` | Кнопки Explorer, Tasks, MRs, Worklog; ↻ перезапускает Claude или Codex вкладки; спрятанные вкладки не показываются; правый клик открывает `menu-plus` |
-| `agents-plus` | клон встроенного `agents` | Список агентов; третий режим сортировки Grouped by folder: по папкам сайдбара, внутри папки самые срочные сверху |
+| `agents-plus` | клон встроенного `agents` | Список агентов; по умолчанию сгруппирован по папкам сайдбара (Grouped by folder), внутри папки разделы Needs you, Done, Working, Idle; Priority и Grouped by space остались в меню сортировки |
 | `menu-plus` | клон встроенного `menu` | Меню вкладки с пунктом Restart Claude / Restart Codex |
 | `new-menu-plus` | клон встроенного `new-menu` | Меню «+» без встроенных Claude Code и Codex: остаются свои обёртки из `programs.json` |
 | `workspace-status-plus` | клон встроенного `workspace-status` | Состояние связи с машиной спейса и ↻ Reconnect |
