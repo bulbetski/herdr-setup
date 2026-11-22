@@ -35,7 +35,7 @@ git checkout -t origin/main
 - `bin/herdr-task`: задачи для команды агентов, на нём работает мод Tasks.
 - `bin/ssh-browser`: Chrome, который ходит на выбранные сайты через SSH-туннель.
 - `bin/ssh-add-host`: вход на машину по ключу вместо пароля, на нём работает диалог Add machine.
-- `bin/agent-restart`: перезапуск Claude Code или Codex в терминале с тем же диалогом, на нём работает кнопка ↻ у агента.
+- `bin/agent-restart`: перезапуск Claude Code или Codex в терминале с тем же диалогом, на нём работает кнопка ↻ в панели вкладок.
 - `themes/whitby-*.json`: светлая и тёмная темы окна из [herdr-whitby](https://github.com/shellscape/herdr-whitby). `themes/atom-one-dark.json`: палитра One Dark.
 - `claude-themes/whitby-*.json`: темы Claude Code в цветах Whitby (`"theme": "custom:whitby-light"` в `~/.claude/settings.json`).
 - `keys.json`, `settings.json`: клавиши и настройки окна. `minimum_contrast: 2` нужен светлой теме, иначе бледный текст агентов на белом фоне не виден.
@@ -48,7 +48,7 @@ git checkout -t origin/main
 |---|---|
 | Сайдбар | `space-folders`: спейсы по папкам, в шапке Spaces кнопки «+ssh» (Add machine), New folder, New space; под ними `agents-plus`; сверху и снизу `workspace-chrome-plus` (внизу только Settings) |
 | Колонка слева | `file-preview` с `mode: "tree"`: Explorer |
-| Панель вкладок | `tabs-plus`: вкладки и кнопки Explorer, Tasks (и MRs, Worklog, если эти моды установлены) |
+| Панель вкладок | `tabs-plus`: вкладки, ↻ (перезапуск агента вкладки) и «+», кнопки Explorer, Tasks (и MRs, Worklog, если эти моды установлены) |
 | Статус-бар слева | `workspace-status-plus`: машина спейса и состояние связи с ней |
 | Статус-бар справа | `tps`, `ssh-browser`, `usage-limits` |
 
@@ -59,12 +59,12 @@ git checkout -t origin/main
 | Мод | Откуда | Что делает |
 |---|---|---|
 | `file-preview`, `file-preview-panel` | [bborrero14/herdr-file-preview](https://github.com/bborrero14/herdr-file-preview), сильно переделан | Explorer: дерево файлов, просмотр и правка во вкладке |
-| `space-folders` | [jankeesvw/herdr-space-folders](https://github.com/jankeesvw/herdr-space-folders), доработан | Папки спейсов в сайдбаре, кнопка ↻ у машины без связи |
+| `space-folders` | [jankeesvw/herdr-space-folders](https://github.com/jankeesvw/herdr-space-folders), доработан | Папки спейсов в сайдбаре, кнопка ↻ у машины без связи; пишет в shared `space-folders.placed`, в какой папке какой спейс (по нему группирует `agents-plus`) |
 | `herdr-md` | [ryanthedev/herdr-md](https://github.com/ryanthedev/herdr-md), без правок | `mdh open файл.md`: Markdown с Mermaid |
 | `usage-limits` | [nozikov/herdr-usage-limits](https://github.com/nozikov/herdr-usage-limits), без правок | Лимиты Claude и Codex |
 | `auto-title` | [kryptamine/herdr-auto-title](https://github.com/kryptamine/herdr-auto-title), без правок | Называет вкладки по тому, что в них происходит; свой сервис ставится из его окна |
-| `tabs-plus` | клон встроенного `tabs` | Кнопки Explorer, Tasks, MRs, Worklog; спрятанные вкладки не показываются; правый клик открывает `menu-plus` |
-| `agents-plus` | клон встроенного `agents` | Список агентов с кнопкой ↻: перезапуск с тем же диалогом, см. «Перезапуск агента» |
+| `tabs-plus` | клон встроенного `tabs` | Кнопки Explorer, Tasks, MRs, Worklog; ↻ перезапускает Claude или Codex вкладки; спрятанные вкладки не показываются; правый клик открывает `menu-plus` |
+| `agents-plus` | клон встроенного `agents` | Список агентов; третий режим сортировки Grouped by folder: по папкам сайдбара, внутри папки самые срочные сверху |
 | `menu-plus` | клон встроенного `menu` | Меню вкладки с пунктом Restart Claude / Restart Codex |
 | `new-menu-plus` | клон встроенного `new-menu` | Меню «+» без встроенных Claude Code и Codex: остаются свои обёртки из `programs.json` |
 | `workspace-status-plus` | клон встроенного `workspace-status` | Состояние связи с машиной спейса и ↻ Reconnect |
@@ -114,7 +114,7 @@ git checkout -t origin/main
 
 ### Перезапуск агента
 
-Нужен, когда агента надо запустить заново (новая версия Claude Code или Codex, другие переменные окружения), а диалог терять не хочется. Кнопка ↻ появляется при наведении на строку Claude или Codex в списке Agents, рядом с булавкой. В меню правого клика по вкладке есть тот же пункт: Restart Claude или Restart Codex для каждого агента во вкладке. Если агент сейчас работает или ждёт ответа, сначала спрашивается подтверждение, потому что текущий ход оборвётся.
+Нужен, когда агента надо запустить заново (новая версия Claude Code или Codex, другие переменные окружения), а диалог терять не хочется. Кнопка ↻ стоит в панели вкладок слева от «+», когда в открытой вкладке есть Claude или Codex, и перезапускает агента в панели под фокусом. В меню правого клика по вкладке есть тот же пункт: Restart Claude или Restart Codex для каждого агента во вкладке. Агент находится и по программе, поэтому кнопка есть и у старой версии, которая не шлёт статус и потому не видна в списке Agents. Если агент сейчас работает или ждёт ответа, сначала спрашивается подтверждение, потому что текущий ход оборвётся.
 
 Делает это `bin/agent-restart <терминал>` (`--dry-run` только печатает команду, `--force` не спрашивает про занятого агента):
 

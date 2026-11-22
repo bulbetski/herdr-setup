@@ -1,5 +1,5 @@
 // Modified from Herdr's built-in `menu` mod (github.com/herdrdev/herdr-app, Apache-2.0, see LICENSE here).
-// Changed: the tab menu has Restart for each Claude or Codex in the tab (agents-plus does the restart).
+// Changed: the tab menu has Restart for each Claude or Codex in the tab (tabs-plus does the restart).
 // Context menus (Herdr's items). Opened as a popup with
 // props { tab: "pane" | "tab" | "space" | "global", target }.
 // ↑/↓ move, Enter runs, Esc closes. An item is [label, command, args];
@@ -57,13 +57,13 @@ function items(p, git) {
       ];
     }
     case "tab": {
-      // Claude and Codex in this tab: agents-plus restarts one on the same conversation. By the
+      // Claude and Codex in this tab: tabs-plus restarts one on the same conversation. By the
       // program too, not only the reported status: an old version that reports none needs it most.
       const kind = (p) => (p.app === "codex" || /^codex/.test(p.program?.key ?? "") ? "Codex" : p.app === "claude-code" || /^claude/.test(p.program?.key ?? "") ? "Claude" : null);
       const here = panes().filter((p) => p.tab === tg.id && p.terminal && kind(p));
       const restart = here.map((p) => [
         here.filter((q) => kind(q) === kind(p)).length > 1 ? `Restart ${kind(p)} ${p.terminal}` : `Restart ${kind(p)}`,
-        `agents-plus.restart:${p.terminal}`,
+        `tabs-plus.restart:${p.terminal}`,
         {},
       ]);
       return [
@@ -93,7 +93,7 @@ function items(p, git) {
 }
 
 function menuIcon(command) {
-  if (command.startsWith("agents-plus.restart:")) return "mods/agents-plus/restart.svg";
+  if (command.startsWith("tabs-plus.restart:")) return "mods/tabs-plus/restart.svg";
   const name = command.endsWith(".close") ? "x" : command.endsWith(".rename") ? "square-pen" : command.endsWith(".new") ? "plus" : command === "worktree" ? "git-branch" : command === "app.help" ? "terminal" : command === "app.theme" ? "settings" : command === "pane.split" ? "panel-right" : command === "pane.zoom" ? "square" : "terminal";
   return `mods/workspace-chrome/${name}.svg`;
 }
@@ -152,7 +152,7 @@ export default class Menu extends View {
       .children(
         list.map((it, i) =>
           v_flex()
-            .when(i > 0 && (list[i - 1][1].startsWith("agents-plus.restart:") && !it[1].startsWith("agents-plus.restart:") || it[1].endsWith(".close") || it[1] === "app.help" || (it[1] === "app.theme" && list[i - 1][1] !== "app.theme")), el => el.child(div().mx(7).my(4).h(1).bg(t.border)))
+            .when(i > 0 && (list[i - 1][1].startsWith("tabs-plus.restart:") && !it[1].startsWith("tabs-plus.restart:") || it[1].endsWith(".close") || it[1] === "app.help" || (it[1] === "app.theme" && list[i - 1][1] !== "app.theme")), el => el.child(div().mx(7).my(4).h(1).bg(t.border)))
             .child(h_flex()
             .id(`mi-${i}`)
             .h(31)

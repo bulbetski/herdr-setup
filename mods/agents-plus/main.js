@@ -1,11 +1,11 @@
 // Modified from Herdr's built-in `agents` mod (github.com/herdrdev/herdr-app, Apache-2.0, see LICENSE here).
-// Changed: a restart button on a Claude or Codex row (and the `restart:<terminal>` command, which the tab
-// menu in menu-plus sends): bin/agent-restart stops the agent and starts it again on the same conversation.
+// Changed: a third sort, "Grouped by folder": the sidebar's folders (space-folders publishes where each
+// space sits), most urgent first inside each.
 // Agents in grouped or priority views; parents take their most urgent sub-agent's place.
 
 import { View, div, image, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { agents, terminals, panes, focused, spaces, run, theme, shared, setShared, setAgentOrder, openOverlay, closeOverlay, props, window, layout, exec, appHome, notify, nextCommand } from "herdr";
+import { agents, terminals, panes, focused, spaces, run, theme, shared, setShared, setAgentOrder, openOverlay, closeOverlay, props, window, layout } from "herdr";
 
 function find(node, id) {
   if (node?.id === id) return node;
@@ -27,9 +27,6 @@ function toggleSidebar() {
   setShared("sidebar.collapsed", !narrow());
   run("layout.resize", { id: "sidebar", px: narrow() ? (shared("sidebar.width") ?? 268) : window()?.platform === "macos" ? 76 : 44 });
 }
-
-// Agents bin/agent-restart can bring back on the same conversation (AgentInfo.app).
-const RESTARTABLE = new Set(["claude-code", "codex"]);
 
 const clean = (s) => (s ?? "").replace(/^[^\p{L}\p{N}]+/u, "").trim();
 
@@ -62,7 +59,11 @@ const kidStatus = (k, listed) => {
 const SORTS = [
   { id: "priority", label: "Priority", icon: "clock" },
   { id: "grouped", label: "Grouped by space", icon: "layers" },
+  { id: "folders", label: "Grouped by folder", icon: "folder" },
 ];
+// Where space-folders put each space: { groups: [{ id, name, color }], of: { spaceId: groupId } }.
+const placed = () => shared("space-folders.placed") ?? { groups: [], of: {} };
+const OTHER = { id: "other", name: "Other", color: null };
 const sortOf = () => SORTS.find((s) => s.id === shared("agents.sort")) ?? SORTS[0];
 const SECTION = { 4: "Needs you", 3: "Done", 2: "Working", 1: "Idle" };
 const SECTION_STATUS = { 4: "blocked", 3: "done", 2: "working" };
@@ -90,49 +91,7 @@ export default class Agents extends View {
     this.pendingPins = JSON.parse(localStorage.getItem("pins") ?? "[]");
     if (!this.pendingPins.length) localStorage.removeItem("pins");
     this.migratingPins = new Set();
-    this.restarting = new Set();
     cx.timer.every(30000, (cx) => cx.notify());
-    // From the tab menu (menu-plus) and the confirm dialog.
-    cx.spawn(async (cx) => {
-      for (;;) {
-        const c = await nextCommand();
-        if (c.startsWith("restart:")) this.restart(c.slice(8), false, cx);
-        else if (c.startsWith("restart-now:")) this.restart(c.slice(12), true, cx);
-      }
-    });
-  }
-
-  // Stops the agent and starts it again on the same conversation. A busy one asks first.
-  restart(address, force, cx) {
-    if (this.restarting.has(address)) return;
-    const a = agents().find((x) => x.address === address);
-    // A sub-agent without a pane isn't in agents(): its own name then.
-    const sub = a ? null : terminals().find((x) => x.address === address);
-    const name = a ? a.space_name || a.tab_name || address : sub?.name || address;
-    this.restarting.add(address);
-    cx.notify();
-    cx.spawn(async (cx) => {
-      const r = await exec(`${appHome()}/bin/agent-restart`, [address, ...(force ? ["--force"] : [])], { timeout: 60000 })
-        .catch((e) => ({ code: 1, stdout: "", stderr: String(e) }));
-      this.restarting.delete(address);
-      cx.notify();
-      let res = null;
-      try { res = JSON.parse(r.stdout.trim().split("\n").pop()); } catch {}
-      if (r.code === 3 && res?.busy) {
-        openOverlay({
-          mod: "confirm", kind: "dialog", width: 380, height: 170,
-          props: {
-            title: `Restart ${name}?`,
-            detail: `It is ${res.busy === "blocked" ? "waiting for you" : "working"}: the current turn stops. The conversation stays.`,
-            command: { name: `agents-plus.restart-now:${address}` },
-          },
-        });
-      } else if (res?.ok) {
-        notify({ title: `Restarted ${name}`, body: "Same conversation, new process.", level: "success", timeout: 4000 });
-      } else {
-        notify({ title: `Couldn't restart ${name}`, body: res?.error ?? (r.stderr || r.stdout || "agent-restart failed").trim(), level: "error" });
-      }
-    });
   }
 
   // Stamps agents whose state changed. Done and idle count as one: looking at a
@@ -278,9 +237,15 @@ export default class Agents extends View {
     const tabCounts = new Map();
     for (const a of list) tabCounts.set(a.tab, (tabCounts.get(a.tab) ?? 0) + 1);
     const byPriority = sort.id === "priority";
+    // By folder: the sidebar's folder order, then the most urgent, the latest change first.
+    const byFolder = sort.id === "folders";
+    const where = placed();
+    const folderOf = (a) => where.groups.find((g) => g.id === where.of[a.space]) ?? OTHER;
+    const folderRank = (a) => { const i = where.groups.indexOf(folderOf(a)); return i < 0 ? where.groups.length : i; };
     const urgency = new Map(list.map((a) => [a.address, Math.max(this.rank(a), ...this.tree(all, a.address).map((s) => RANK[kidStatus(s.t, this.listed)] ?? 0))]));
     const rankOf = (a) => urgency.get(a.address);
     if (byPriority) list = [...list].sort((x, y) => rankOf(y) - rankOf(x) || this.since(y) - this.since(x) || y.seq - x.seq);
+    if (byFolder) list = [...list].sort((x, y) => folderRank(x) - folderRank(y) || rankOf(y) - rankOf(x) || this.since(y) - this.since(x) || y.seq - x.seq);
     const pinned = list.filter((a) => a.pinned);
     const rest = list.filter((a) => !a.pinned);
     list = [...pinned, ...rest];
@@ -376,25 +341,9 @@ export default class Agents extends View {
           cx.notify();
         })
         .child(svg(`mods/workspace-chrome/${isPinned ? "pin-off" : "pin"}.svg`).size(13));
-      const restarting = this.restarting.has(a.address);
-      const restart = div()
-        .id(`restart-${a.address}`)
-        .flex_none()
-        .p(2)
-        .rounded(4)
-        .text_color(t.dim)
-        .cursor_pointer()
-        .hover((s) => s.bg(t.hover).text_color(t.foreground))
-        .tooltip("Restart, keep the conversation")
-        .on_click((_e, cx) => {
-          cx.stop_propagation();
-          this.restart(a.address, false, cx);
-        })
-        .child(svg("mods/agents-plus/restart.svg").size(13));
-      const canRestart = RESTARTABLE.has(a.app);
       // Under a space header the space goes without saying; an automatic tab number says nothing.
       // Without a space header above (priority, pinned) the row names its space.
-      const full = byPriority || isPinned;
+      const full = byPriority || byFolder || isPinned;
       const name = full ? a.space_name || label(a) : more ?? (/^\d+$/.test(label(a)) ? a.program?.name || label(a) : label(a));
       return h_flex()
         .id(`ag-${a.address}`)
@@ -424,10 +373,8 @@ export default class Agents extends View {
           .when(full && Boolean(more), el => el.child(div().flex_1().min_w(0).truncate().text_color(t.dim).child(`\u00b7 ${more}`))))
         .when(Boolean(machine), el => el.child(div().text_size(10).text_color(t.dim).child(machine)))
         .when(subs.length > 0, el => el.child(fold(a, subs)))
-        .when(restarting, el => el.child(svg("mods/workspace-chrome/spinner.svg").size(12).flex_none().text_color(t.dim).spin(900)))
-        .when(this.hovered === a.address && canRestart && !restarting, el => el.child(restart))
         .when(this.hovered === a.address, el => el.child(pin))
-        .when(this.hovered !== a.address && !restarting && Boolean(when), el => el.child(div().flex_none().text_size(11).text_color(t.dim).child(duration(now - when))))
+        .when(this.hovered !== a.address && Boolean(when), el => el.child(div().flex_none().text_size(11).text_color(t.dim).child(duration(now - when))))
         .child(this.status(t, a, byPriority && !isPinned));
     };
 
@@ -436,9 +383,10 @@ export default class Agents extends View {
     const groups = pinned.length ? [{ id: "pinned", label: "Pinned", status: null, members: pinned }] : [];
     for (const a of rest) {
       const r = rankOf(a) || RANK.idle;
-      const id = byPriority ? `sec-${r}` : `sp-${a.space}`;
+      const folder = byFolder ? folderOf(a) : null;
+      const id = byPriority ? `sec-${r}` : byFolder ? `fo-${folder.id}` : `sp-${a.space}`;
       if (groups.at(-1)?.id === id) groups.at(-1).members.push(a);
-      else groups.push({ id, label: byPriority ? SECTION[r] : a.space_name || "", status: byPriority ? SECTION_STATUS[r] : null, members: [a] });
+      else groups.push({ id, label: byPriority ? SECTION[r] : byFolder ? folder.name : a.space_name || "", status: byPriority ? SECTION_STATUS[r] : null, color: folder?.color ?? null, members: [a] });
     }
 
     // A group's header; it folds the group. Folded, it says how many and the most urgent state.
@@ -461,8 +409,9 @@ export default class Agents extends View {
           open ? this.folded.add(g.id) : this.folded.delete(g.id);
           cx.notify();
         })
+        .when(Boolean(g.color), (el) => el.child(div().size(7).flex_none().rounded(2).bg(g.color?.startsWith("#") ? g.color : t[g.color] ?? t.dim)))
         .child(div().truncate().text_color(t[g.status] ?? t.dim).child(g.label))
-        .when(byPriority || !open, (el) => el.child(div().text_color(t.dim).child(String(g.members.length))))
+        .when(byPriority || byFolder || !open, (el) => el.child(div().text_color(t.dim).child(String(g.members.length))))
         .child(div().flex_1())
         .when(!open, (el) => el
           .when(!byPriority && top && top !== "idle", (el) => el.child(this.status(t, { status: top }, true)))
@@ -496,7 +445,7 @@ export default class Agents extends View {
                 .text_size(11)
                 .text_color(t.dim)
                 .hover((s) => s.text_color(t.foreground))
-                .on_click(() => openOverlay({ mod: "agents-plus", kind: "popup", width: 200, height: 140, props: { sortMenu: true } }))
+                .on_click(() => openOverlay({ mod: "agents-plus", kind: "popup", width: 200, height: 172, props: { sortMenu: true } }))
                 .tooltip(`Sort agents: ${sort.label}`)
                 .child(svg(`mods/workspace-chrome/${sort.icon}.svg`).size(14)),
             ),

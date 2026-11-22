@@ -2,7 +2,10 @@
 // Changed by bulbetski: see the setup's README for what differs from the original.
 import { View, div, svg, image } from "gpui-kit";
 import { h_flex, ScrollHandle } from "gpui-base";
-import { spaces, panes, run, openOverlay, theme, window, shared, layout, settings, keys, readTextFile, appHome } from "herdr";
+import { spaces, panes, agents, terminals, run, openOverlay, theme, window, shared, layout, settings, keys, readTextFile, appHome, exec, notify, nextCommand } from "herdr";
+
+// Claude or Codex in a pane: by the reported app, else by the program (an old version reports nothing).
+const agentKind = (p) => (p.app === "codex" || /^codex/.test(p.program?.key ?? "") ? "Codex" : p.app === "claude-code" || /^claude/.test(p.program?.key ?? "") ? "Claude" : null);
 
 // Explorer: file-preview (github.com/bborrero14/herdr-file-preview) as the layout's left column "explorer".
 const EXPLORER = "explorer";
@@ -41,6 +44,47 @@ export default class Tabs extends View {
     this.pressed = null;
     this.scroll = ScrollHandle.new();
     this.panels = JSON.parse(localStorage.getItem("panels") ?? "{}");
+    this.restarting = new Set();
+    // "restart:<terminal>" from the tab menu (menu-plus), "restart-now:<terminal>" from the confirm dialog.
+    cx.spawn(async (cx) => {
+      for (;;) {
+        const c = await nextCommand();
+        if (c.startsWith("restart:")) this.restart(c.slice(8), false, cx);
+        else if (c.startsWith("restart-now:")) this.restart(c.slice(12), true, cx);
+      }
+    });
+  }
+
+  // bin/agent-restart stops the agent and starts it again on the same conversation. A busy one asks first.
+  restart(address, force, cx) {
+    if (this.restarting.has(address)) return;
+    const a = agents().find((x) => x.address === address);
+    const term = terminals().find((x) => x.address === address);
+    const name = a ? a.space_name || a.tab_name || address : term?.name || term?.labels?.where || address;
+    this.restarting.add(address);
+    cx.notify();
+    cx.spawn(async (cx) => {
+      const r = await exec(`${appHome()}/bin/agent-restart`, [address, ...(force ? ["--force"] : [])], { timeout: 60000 })
+        .catch((e) => ({ code: 1, stdout: "", stderr: String(e) }));
+      this.restarting.delete(address);
+      cx.notify();
+      let res = null;
+      try { res = JSON.parse(r.stdout.trim().split("\n").pop()); } catch {}
+      if (r.code === 3 && res?.busy) {
+        openOverlay({
+          mod: "confirm", kind: "dialog", width: 380, height: 170,
+          props: {
+            title: `Restart ${name}?`,
+            detail: `It is ${res.busy === "blocked" ? "waiting for you" : "working"}: the current turn stops. The conversation stays.`,
+            command: { name: `tabs-plus.restart-now:${address}` },
+          },
+        });
+      } else if (res?.ok) {
+        notify({ title: `Restarted ${name}`, body: "Same conversation, new process.", level: "success", timeout: 4000 });
+      } else {
+        notify({ title: `Couldn't restart ${name}`, body: res?.error ?? (r.stderr || r.stdout || "agent-restart failed").trim(), level: "error" });
+      }
+    });
   }
 
   // The side panel is remembered per space: switching shows that space's choice
@@ -114,6 +158,8 @@ export default class Tabs extends View {
     const panel = find(root, "panel"), body = find(root, "panel-body");
     const enabled = shared("workspace.panels") ?? ["files", "changes"];
     this.syncPanel(space, panel, body, enabled);
+    const here = panes().filter((p) => p.tab === selected && p.terminal && agentKind(p));
+    const restartable = here.find((p) => p.focused) ?? here[0] ?? null;
     const explorer = find(root, EXPLORER), explorerOn = Boolean(explorer && !explorer.hidden);
     const panelButton = (id, label, icon, tip) => {
       const on = panel && !panel.hidden && body?.active === id;
@@ -131,6 +177,12 @@ export default class Tabs extends View {
       .child(h_flex().id("tab-scroll").flex_1().min_w(0).h_full().items_center().gap(3).overflow_x_scrollbar().track_scroll(this.scroll)
         .on_size_change((_size, cx) => { if (active >= 0) { this.scroll.scroll_to_item(active); cx.notify(); } })
         .children(shown.map(item)))
+      // Restart the Claude or Codex of this tab (the focused pane's first) on the same conversation.
+      .when(Boolean(restartable), el => el.child(button("tab-restart",
+        this.restarting.has(restartable.terminal)
+          ? svg("mods/workspace-chrome/spinner.svg").size(13).text_color(t.dim).spin(900)
+          : svg("mods/tabs-plus/restart.svg").size(13),
+        (_e, cx) => this.restart(restartable.terminal, false, cx)).tooltip(`Restart ${agentKind(restartable)}, keep the conversation`)))
       .child(button("tab-new", "+", () => openOverlay({ mod: "new-menu-plus", kind: "popup", width: 250, height: 512 })))
       // Files and Changes (gitview) are gone: the Explorer column has the tree, history and changes.
       .when(Boolean(explorer), el => el.child(h_flex().id("toggle-explorer").h(26).px(8).gap(5).flex_none().items_center().rounded(6)

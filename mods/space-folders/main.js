@@ -735,6 +735,36 @@ export default class Spaces extends View {
     return hidden ? [] : [head, ...(folded ? [] : body)];
   }
 
+  // Which top folder each space shows under, for other mods (agents-plus groups agents by it):
+  // shared "space-folders.placed" = { groups: [{ id, name, color }], of: { spaceId: groupId } }.
+  // A space of another machine goes to the folder here that takes that machine in, else to that
+  // machine's own folder, else under the machine's name. Spaces in no folder are left out of `of`.
+  publish() {
+    const rows = this.ordered(), ps = panes();
+    const groups = [], of = {};
+    const group = (id, name, color) => { if (!groups.some((g) => g.id === id)) groups.push({ id, name, color: color ?? null }); return id; };
+    const local = folders(null).list;
+    for (const f of local) group(f.id, f.name, f.color);
+    const place = (mine, list, host) => {
+      let parent = null;
+      for (const r of mine) {
+        if (!r.tree) parent = folderOf(r.w, list, ps);
+        const own = parent && list.list.find((f) => f.id === parent);
+        const id = host ? host(own) : own ? own.id : null;
+        if (id) of[r.w.id] = id;
+      }
+    };
+    place(rows.filter((r) => !r.w.machine), folders(null), null);
+    const remote = [...new Set(rows.map((r) => r.w.machine).filter(Boolean))].sort();
+    for (const m of remote) {
+      const mine = rows.filter((r) => r.w.machine === m);
+      const housed = machineFolder(m, mine, ps);
+      place(mine, folders(m), (own) => housed ?? (own ? group(`${m}/${own.id}`, own.name, own.color) : group(`machine:${m}`, m, null)));
+    }
+    const next = { groups, of };
+    if (JSON.stringify(next) !== JSON.stringify(shared("space-folders.placed") ?? null)) setShared("space-folders.placed", next);
+  }
+
   // The rows, under a header per machine once one isn't this computer. A
   // machine a folder here takes in shows in that folder instead. `seen`
   // collects the spaces in this order (see foldered).
@@ -874,6 +904,7 @@ export default class Spaces extends View {
       .hover(s => s.bg(t.hover).text_color(t.foreground)).on_click(action).child(svg(`mods/workspace-chrome/${icon}.svg`).size(14));
     const seen = [], rows = this.grouped(t, collapsed, seen);
     this.seen = seen;
+    this.publish();
     return v_flex().size_full().min_h(0).bg(t.chrome).text_size(13)
       .child(h_flex().h(31).pl(16).pr(10).items_center().justify_between().text_size(11.5).text_color(t.dim)
         .when(!collapsed, el => el.child("Spaces"))
