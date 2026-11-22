@@ -1,6 +1,6 @@
 // Modified from Herdr's built-in `agents` mod (github.com/herdrdev/herdr-app, Apache-2.0, see LICENSE here).
 // Changed: a third sort, "Grouped by folder": the sidebar's folders (space-folders publishes where each
-// space sits), most urgent first inside each.
+// space sits), each with its own Needs you / Done / Working / Idle sections.
 // Agents in grouped or priority views; parents take their most urgent sub-agent's place.
 
 import { View, div, image, svg } from "gpui-kit";
@@ -375,7 +375,7 @@ export default class Agents extends View {
         .when(subs.length > 0, el => el.child(fold(a, subs)))
         .when(this.hovered === a.address, el => el.child(pin))
         .when(this.hovered !== a.address && Boolean(when), el => el.child(div().flex_none().text_size(11).text_color(t.dim).child(duration(now - when))))
-        .child(this.status(t, a, byPriority && !isPinned));
+        .child(this.status(t, a, (byPriority || byFolder) && !isPinned));
     };
 
     // Groups in list order: spaces (grouped) or priority sections. Agents of a
@@ -410,16 +410,52 @@ export default class Agents extends View {
           cx.notify();
         })
         .when(Boolean(g.color), (el) => el.child(div().size(7).flex_none().rounded(2).bg(g.color?.startsWith("#") ? g.color : t[g.color] ?? t.dim)))
-        .child(div().truncate().text_color(t[g.status] ?? t.dim).child(g.label))
+        .child(div().truncate().text_color(t[g.status] ?? (byFolder && g.id !== "pinned" ? t.muted : t.dim)).when(byFolder, (el) => el.font_semibold()).child(g.label))
         .when(byPriority || byFolder || !open, (el) => el.child(div().text_color(t.dim).child(String(g.members.length))))
         .child(div().flex_1())
         .when(!open, (el) => el
           .when(!byPriority && top && top !== "idle", (el) => el.child(this.status(t, { status: top }, true)))
           .child(svg("mods/workspace-chrome/chevron-right.svg").size(11).flex_none().text_color(t.dim)));
     };
-    const rows = collapsed
-      ? list.flatMap(withKids)
-      : groups.flatMap((g) => [header(g), ...(this.folded.has(g.id) ? [] : g.members.flatMap(withKids))]);
+    // By folder, a folder's agents in priority sections of their own (members are sorted by urgency).
+    const sections = (g) => {
+      const out = [];
+      for (const a of g.members) {
+        const r = rankOf(a) || RANK.idle;
+        if (out.at(-1)?.r === r) out.at(-1).members.push(a);
+        else out.push({ id: `${g.id}-sec-${r}`, r, label: SECTION[r], status: SECTION_STATUS[r] ?? null, members: [a] });
+      }
+      return out;
+    };
+    // A section's header under a folder: smaller, indented, folds the section.
+    const subheader = (s) => {
+      const open = !this.folded.has(s.id);
+      return h_flex()
+        .id(s.id)
+        .pl(22)
+        .pr(8)
+        .h(22)
+        .flex_none()
+        .gap(5)
+        .items_center()
+        .text_size(10.5)
+        .cursor_pointer()
+        .hover((el) => el.text_color(t.foreground))
+        .on_click((_e, cx) => {
+          open ? this.folded.add(s.id) : this.folded.delete(s.id);
+          cx.notify();
+        })
+        .child(div().text_color(t[s.status] ?? t.dim).child(s.label))
+        .child(div().text_color(t.dim).child(String(s.members.length)))
+        .child(div().flex_1())
+        .when(!open, (el) => el.child(svg("mods/workspace-chrome/chevron-right.svg").size(10).flex_none().text_color(t.dim)));
+    };
+    const body = (g) => {
+      if (this.folded.has(g.id)) return [];
+      if (!byFolder || g.id === "pinned") return g.members.flatMap(withKids);
+      return sections(g).flatMap((s) => [subheader(s), ...(this.folded.has(s.id) ? [] : s.members.flatMap(withKids))]);
+    };
+    const rows = collapsed ? list.flatMap(withKids) : groups.flatMap((g) => [header(g), ...body(g)]);
 
     return v_flex()
       .size_full()
