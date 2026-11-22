@@ -900,7 +900,7 @@ export default class Spaces extends View {
     // While a space in a folder is dragged, a place to drop it out of the folder.
     const dragged = this.pressed !== null ? spaces()[this.pressed] : null;
     const leaving = Boolean(dragged && folderOf(dragged, folders(dragged.machine ?? null), panes()));
-    const button = (id, icon, action) => div().id(id).size(26).flex_none().flex().items_center().justify_center().rounded(6)
+    const button = (id, icon, action) => div().id(id).size(26).flex_none().flex().items_center().justify_center().rounded(6).cursor_pointer()
       .hover(s => s.bg(t.hover).text_color(t.foreground)).on_click(action).child(svg(`mods/workspace-chrome/${icon}.svg`).size(14));
     const seen = [], rows = this.grouped(t, collapsed, seen);
     this.seen = seen;
