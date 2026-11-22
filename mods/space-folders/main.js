@@ -913,8 +913,8 @@ export default class Spaces extends View {
             .font_family(settings().font_family || "JetBrains Mono").text_size(10.5).font_medium()
             .cursor_pointer().hover(s => s.bg(t.hover).text_color(t.foreground)).tooltip("Add machine")
             .on_click(() => run("mod.open", { name: "machine-add-plus" })).child("+ssh")))
-          .when(!collapsed, el => el.child(button("folder-new", "folder-plus", () => this.newFolder(null))))
-          .child(button("space-new", "plus", () => newSpaceIn(undefined, null)))))
+          .when(!collapsed, el => el.child(button("folder-new", "folder-plus", () => this.newFolder(null)).tooltip("New folder")))
+          .child(button("space-new", "plus", () => newSpaceIn(undefined, null)).tooltip("New space"))))
       .child(v_flex().flex_1().min_h(0).px(8).pb(14).overflow_y_scrollbar().mode("always")
         // Released anywhere but on a space or a folder: out of its folder.
         .on_mouse_up("left", (_e, cx) => {
