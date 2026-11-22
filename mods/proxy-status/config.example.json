@@ -1,0 +1,11 @@
+{
+  "// what": "The proxy the agents of another machine use. machine: its name in `hc machine ls`; proxy: as curl -x takes it; url: a site the proxy must reach; fix: shell lines run on that machine to restart the VPN client; auto_fix: restart on its own when nothing listens on the port (at most every 5 minutes).",
+  "machine": "vps",
+  "label": "VPS VPN",
+  "proxy": "http://127.0.0.1:10808",
+  "url": "https://chatgpt.com/",
+  "auto_fix": true,
+  "fix": [
+    "systemctl --user restart my-vpn-client"
+  ]
+}

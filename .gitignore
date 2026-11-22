@@ -48,6 +48,7 @@ jsconfig.json
 /README.local.md
 /programs.json
 /mods/tasks/config.json
+/mods/proxy-status/config.json
 /mods/redline/
 /mods/worklog/
 /herdr-shot.png
