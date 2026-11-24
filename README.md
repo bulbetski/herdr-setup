@@ -63,12 +63,12 @@ git checkout -t origin/main
 | Мод | Откуда | Что делает |
 |---|---|---|
 | `file-preview`, `file-preview-panel` | [bborrero14/herdr-file-preview](https://github.com/bborrero14/herdr-file-preview), сильно переделан | Explorer: дерево файлов, просмотр и правка во вкладке; файл или папку с другой машины качает в `~/Downloads` этого компьютера (кнопка на выбранной строке, над открытым файлом и пункт Download to Mac в меню) |
-| `space-folders` | [jankeesvw/herdr-space-folders](https://github.com/jankeesvw/herdr-space-folders), доработан | Папки спейсов в сайдбаре, кнопка ↻ у машины без связи; пишет в shared `space-folders.placed`, в какой папке какой спейс (по нему группирует `agents-plus`) |
+| `space-folders` | [jankeesvw/herdr-space-folders](https://github.com/jankeesvw/herdr-space-folders), доработан | Папки спейсов в сайдбаре, кнопка ↻ у машины без связи. Папки вкладываются: New subfolder в меню папки или перетаскивание папки на середину заголовка другой (на верхний или нижний край ставит рядом, «Drop here…» внизу поднимает на уровень выше); при удалении папки её содержимое уходит в родителя. Пишет в shared `space-folders.placed`, в какой папке какой спейс (по нему группирует `agents-plus`) |
 | `herdr-md` | [ryanthedev/herdr-md](https://github.com/ryanthedev/herdr-md), без правок | `mdh open файл.md`: Markdown с Mermaid |
 | `usage-limits` | [nozikov/herdr-usage-limits](https://github.com/nozikov/herdr-usage-limits), без правок | Лимиты Claude и Codex |
 | `auto-title` | [kryptamine/herdr-auto-title](https://github.com/kryptamine/herdr-auto-title), без правок | Называет вкладки по тому, что в них происходит; свой сервис ставится из его окна |
 | `tabs-plus` | клон встроенного `tabs` | Кнопки Explorer, Tasks, MRs, Worklog; ↻ перезапускает Claude или Codex вкладки; спрятанные вкладки не показываются; правый клик открывает `menu-plus` |
-| `agents-plus` | клон встроенного `agents` | Список агентов; по умолчанию сгруппирован по папкам сайдбара (Grouped by folder), внутри папки разделы Needs you, Done, Working, Idle; Priority и Grouped by space остались в меню сортировки |
+| `agents-plus` | клон встроенного `agents` | Список агентов; по умолчанию сгруппирован по папкам сайдбара (Grouped by folder, подпапка называется «Папка / Подпапка»), внутри папки разделы Needs you, Done, Working, Idle; Priority и Grouped by space остались в меню сортировки. Агента можно перетащить на другую папку в списке агентов или на папку в сайдбаре: переезжает его спейс со всеми агентами |
 | `menu-plus` | клон встроенного `menu` | Меню вкладки с пунктом Restart Claude / Restart Codex |
 | `new-menu-plus` | клон встроенного `new-menu` | Меню «+» без встроенных Claude Code и Codex: остаются свои обёртки из `programs.json` |
 | `workspace-status-plus` | клон встроенного `workspace-status` | Состояние связи с машиной спейса и ↻ Reconnect; карточка машины при наведении |

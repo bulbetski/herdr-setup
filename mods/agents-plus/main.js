@@ -1,6 +1,7 @@
 // Modified from Herdr's built-in `agents` mod (github.com/herdrdev/herdr-app, Apache-2.0, see LICENSE here).
 // Changed: a third sort, the default, "Grouped by folder": the sidebar's folders (space-folders publishes where each
-// space sits), each with its own Needs you / Done / Working / Idle sections.
+// space sits), each with its own Needs you / Done / Working / Idle sections. An agent dragged onto another
+// folder's header or agents (here, or onto a folder in the sidebar) moves its space, with every agent in it, there.
 // Agents in grouped or priority views; parents take their most urgent sub-agent's place.
 
 import { View, div, image, svg } from "gpui-kit";
@@ -61,9 +62,11 @@ const SORTS = [
   { id: "grouped", label: "Grouped by space", icon: "layers" },
   { id: "folders", label: "Grouped by folder", icon: "folder" },
 ];
-// Where space-folders put each space: { groups: [{ id, name, color }], of: { spaceId: groupId } }.
+// Where space-folders put each space: { groups: [{ id, name, color, machine, folder }], of: { spaceId: groupId } }.
 const placed = () => shared("space-folders.placed") ?? { groups: [], of: {} };
-const OTHER = { id: "other", name: "Other", color: null };
+const OTHER = { id: "other", name: "Other", color: null, machine: null, folder: null };
+// The agent being dragged, for space-folders to take too: { space, machine, address }.
+const DRAG = "agents.drag";
 // Its own key, so the built-in mod's saved choice doesn't override the default here: by folder.
 const SORT_KEY = "agents-plus.sort";
 const sortOf = () => SORTS.find((s) => s.id === shared(SORT_KEY)) ?? SORTS.find((s) => s.id === "folders");
@@ -356,6 +359,7 @@ export default class Agents extends View {
         .items_center()
         .gap(9)
         .when(a.focused, (el) => el.bg(t.selected))
+        .when(drag?.address === a.address && Boolean(this.over), (el) => el.opacity(0.5))
         .cursor_pointer()
         .hover((s) => s.bg(t.hover))
         .on_hover((on, cx) => {
@@ -363,6 +367,16 @@ export default class Agents extends View {
           else if (this.hovered === a.address) this.hovered = null;
           cx.notify();
         })
+        // Pressed, it may be dragged: onto another folder, here or in the sidebar.
+        .on_mouse_down("left", (_e, cx) => {
+          const space = spaces().find((s) => s.id === a.space);
+          if (!space || collapsed) return;
+          this.drag = { space: a.space, machine: space.machine ?? null, address: a.address, from: groupOf.get(a.address)?.id ?? null };
+          this.over = null;
+          setShared(DRAG, { space: a.space, machine: space.machine ?? null, address: a.address });
+          cx.notify();
+        })
+        .on_mouse_move((e, cx) => aimAt(a.pinned ? null : groupOf.get(a.address), cx, e))
         .on_click(() => run("pane.focus", { pane: a.pane }))
         .when(Boolean(pic), el => el.child(div().id(`agent-fold-${a.address}`)
           .when(subs.length > 0, el => el.on_click((_e, cx) => {
@@ -383,30 +397,63 @@ export default class Agents extends View {
     // Groups in list order: spaces (grouped) or priority sections. Agents of a
     // space are next to each other in agents(), so neighbours make a group.
     const groups = pinned.length ? [{ id: "pinned", label: "Pinned", status: null, members: pinned }] : [];
+    // The agent being dragged, while its drag is on, and the folders its space can go to.
+    const drag = this.drag && shared(DRAG)?.address === this.drag.address ? this.drag : null;
+    const takes = (g) => Boolean(drag && byFolder && g?.id?.startsWith("fo-")
+      && (g.machine ?? null) === drag.machine && g.id !== drag.from);
     for (const a of rest) {
       const r = rankOf(a) || RANK.idle;
       const folder = byFolder ? folderOf(a) : null;
       const id = byPriority ? `sec-${r}` : byFolder ? `fo-${folder.id}` : `sp-${a.space}`;
       if (groups.at(-1)?.id === id) groups.at(-1).members.push(a);
-      else groups.push({ id, label: byPriority ? SECTION[r] : byFolder ? folder.name : a.space_name || "", status: byPriority ? SECTION_STATUS[r] : null, color: folder?.color ?? null, members: [a] });
+      else groups.push({ id, label: byPriority ? SECTION[r] : byFolder ? folder.name : a.space_name || "", status: byPriority ? SECTION_STATUS[r] : null, color: folder?.color ?? null, machine: folder?.machine ?? null, folder: folder?.folder ?? null, members: [a] });
     }
+    // While an agent is dragged, by folder, the folders it could go to show too, empty or not.
+    if (byFolder && drag) {
+      const all = [...where.groups, OTHER];
+      for (const [n, f] of all.entries()) {
+        const id = `fo-${f.id}`;
+        if (groups.some((g) => g.id === id) || !takes({ id, machine: f.machine ?? null, folder: f.folder ?? null })) continue;
+        const after = all.slice(0, n).map((x) => `fo-${x.id}`);
+        let at = 0;
+        groups.forEach((g, k) => { if (g.id === "pinned" || after.includes(g.id)) at = k + 1; });
+        groups.splice(at, 0, { id, label: f.name, status: null, color: f.color ?? null, machine: f.machine ?? null, folder: f.folder ?? null, members: [] });
+      }
+    }
+    const groupOf = new Map(groups.flatMap((g) => g.id === "pinned" ? [] : g.members.map((a) => [a.address, g])));
+    // Over a group (its header, a section or an agent of it) while dragging: that group lights up.
+    // `e` marks the move as taken, so the list under it (moved over too) leaves `over` alone.
+    const aimAt = (g, cx, e) => {
+      if (e) this.aimed = e.position;
+      const id = takes(g) ? g.id : null;
+      if (drag && this.over !== id) { this.over = id; cx.notify(); }
+    };
+    const dropOn = () => {
+      const g = groups.find((x) => x.id === this.over);
+      if (drag && takes(g)) setShared("space-folders.moveSpace", { space: drag.space, folder: g.folder ?? null, at: Date.now() });
+    };
 
     // A group's header; it folds the group. Folded, it says how many and the most urgent state.
     const header = (g) => {
       const open = !this.folded.has(g.id);
       const top = g.members.reduce((m, a) => ((RANK[a.status] ?? 0) > (RANK[m] ?? 0) ? a.status : m), null);
+      const lit = Boolean(drag) && this.over === g.id;
       return h_flex()
         .id(g.id)
         .px(8)
-        .pt(8)
-        .h(30)
+        .mt(lit ? 4 : 0)
+        .pt(lit ? 4 : 8)
+        .h(lit ? 26 : 30)
         .flex_none()
         .gap(6)
         .items_center()
+        .rounded(7)
+        .when(lit, (el) => el.bg(t.selected).border_1().border_color(t.accent))
         .text_size(11)
         .font_medium()
         .cursor_pointer()
         .hover((s) => s.text_color(t.foreground))
+        .on_mouse_move((e, cx) => aimAt(g, cx, e))
         .on_click((_e, cx) => {
           open ? this.folded.add(g.id) : this.folded.delete(g.id);
           cx.notify();
@@ -430,7 +477,7 @@ export default class Agents extends View {
       return out;
     };
     // A section's header under a folder: smaller, indented, folds the section.
-    const subheader = (s) => {
+    const subheader = (g, s) => {
       const open = !this.folded.has(s.id);
       return h_flex()
         .id(s.id)
@@ -443,6 +490,7 @@ export default class Agents extends View {
         .text_size(10.5)
         .cursor_pointer()
         .hover((el) => el.text_color(t.foreground))
+        .on_mouse_move((e, cx) => aimAt(g, cx, e))
         .on_click((_e, cx) => {
           open ? this.folded.add(s.id) : this.folded.delete(s.id);
           cx.notify();
@@ -455,17 +503,28 @@ export default class Agents extends View {
     const body = (g) => {
       if (this.folded.has(g.id)) return [];
       if (!byFolder || g.id === "pinned") return g.members.flatMap(withKids);
-      return sections(g).flatMap((s) => [subheader(s), ...(this.folded.has(s.id) ? [] : s.members.flatMap(withKids))]);
+      return sections(g).flatMap((s) => [subheader(g, s), ...(this.folded.has(s.id) ? [] : s.members.flatMap(withKids))]);
     };
     const rows = collapsed ? list.flatMap(withKids) : groups.flatMap((g) => [header(g), ...body(g)]);
 
+    // Let go here: onto the folder it's over, if any; a press anywhere else ends a drag let go of outside.
+    const endDrag = (cx) => {
+      if (!this.drag && !shared(DRAG)) return;
+      this.drag = null;
+      this.over = null;
+      if (shared(DRAG)) setShared(DRAG, null);
+      cx.notify();
+    };
     return v_flex()
+      .id("agents")
       .size_full()
       .min_h(0)
       .bg(t.chrome)
       .border_t(1)
       .border_color(t.border)
       .text_size(13)
+      .on_mouse_up("left", (_e, cx) => { dropOn(); endDrag(cx); })
+      .on_mouse_down_out((_e, cx) => endDrag(cx))
       .when(!collapsed, (el) =>
         el.child(
           h_flex()
@@ -492,7 +551,12 @@ export default class Agents extends View {
       .when(list.length === 0 && !collapsed, (el) =>
         el.child(div().px(12).text_size(12).text_color(t.dim).child("No agent status yet. Agents show up here when they report their status. Older versions and agents inside tmux may not.")),
       )
-      .child(v_flex().id("ag-list").flex_1().min_h(0).px(collapsed ? 0 : 8).overflow_y_scrollbar().mode("always").children(rows))
+      .child(v_flex().id("ag-list").flex_1().min_h(0).px(collapsed ? 0 : 8).overflow_y_scrollbar().mode("always").children(rows)
+        // Moved over the list but no group: nothing to drop on.
+        .on_mouse_move((e, cx) => {
+          const mine = this.aimed && this.aimed.x === e.position.x && this.aimed.y === e.position.y;
+          if (!mine && drag && this.over) { this.over = null; cx.notify(); }
+        }))
       .when(collapsed, (el) =>
         el.child(
           h_flex()
