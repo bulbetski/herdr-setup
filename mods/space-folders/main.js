@@ -15,9 +15,9 @@
 // in a folder's menu makes one in it. An agent dragged from agents-plus onto a
 // folder's header puts its space there.
 
-import { View, div, svg } from "gpui-kit";
+import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
-import { spaces, machines, panes, run, openOverlay, closeOverlay, props, exec, hc, theme, shared, setShared, watchFolder, window, layout, pickFolder, home, nextCommand, notify, settings } from "herdr";
+import { spaces, machines, panes, run, openOverlay, closeOverlay, props, exec, hc, theme, shared, setShared, watchFolder, window, layout, pickFolder, home, nextCommand, notify, settings, knownAgents } from "herdr";
 
 // A connection error for the details window (conn-details), as a toast that opens it and stays.
 function reportError(machine, target, title, body) {
@@ -95,12 +95,26 @@ async function expand(machine, path) {
 // (see adopt). Added locally: the machine always goes to Herdr ("" is this
 // computer), since a click with none starts it on the focused space's machine,
 // in a folder that may not exist there. Only machine undefined leaves it to Herdr.
-async function newSpaceIn(machine, id) {
+// With `agent` (one of knownAgents()), the space starts with it running, its tab named after it.
+async function newSpaceIn(machine, id, agent = null) {
   setShared("space-folders.new", { machine, id, before: spaces().map((s) => s.id), until: Date.now() + 60000 });
-  const path = id && folders(machine).list.find((f) => f.id === id)?.path;
+  const list = folders(machine).list, f = byId(list, id);
+  const path = f ? pathOf(list, f) : null;
   const folder = path ? await expand(machine, path).catch(() => null) : null;
-  run("space.new", { ...(machine !== undefined ? { machine: machine ?? "" } : {}), ...(folder ? { folder } : {}) });
+  run("space.new", { ...(machine !== undefined ? { machine: machine ?? "" } : {}), ...(folder ? { folder } : {}),
+    ...(agent ? { argv: agent.run, tab: agent.name } : {}) });
 }
+
+// A folder's project folder: its own, else the nearest one of the folders it's in.
+function pathOf(list, x) {
+  for (let f = x; f; f = byId(list, parentOf(list, f))) if (f.path) return f.path;
+  return null;
+}
+
+// The agents a machine can run, as new-menu-plus lists them (its cache, shared): the
+// per-account wrappers from programs.json, not the bare claude and codex.
+const KNOWN = "new-menu.agents";
+const HIDDEN = new Set(["claude", "codex"]);
 
 // A rule of "Collect spaces from" takes a folder and everything in it. "~" is
 // any home, "*" any one folder name, and a rule starting with neither "/" nor
@@ -204,11 +218,28 @@ const lastPart = (p) => {
 export default class Spaces extends View {
   init(_props, cx) {
     // As an overlay of the sidebar: a folder's menu, or the dialog editing one.
-    const { folderMenu, edit, machine = null, fresh = false, parent = null, overlay } = props() ?? {};
+    const { folderMenu, addMenu, edit, machine = null, fresh = false, parent = null, overlay } = props() ?? {};
     if (folderMenu) { this.folderMenu = { id: folderMenu, machine, overlay }; return; }
+    if (addMenu) {
+      // A folder's +: a terminal or an agent, in a new space in the folder's project folder.
+      this.adding = { id: addMenu, machine, overlay };
+      this.agents = (shared(KNOWN)?.[key(machine)] ?? []).filter((a) => !HIDDEN.has(a.key));
+      this.handle = cx.focus_handle();
+      this.handle.focus();
+      cx.spawn(async (cx) => {
+        try {
+          this.agents = (await knownAgents({ on: machine })).filter((a) => !HIDDEN.has(a.key));
+          setShared(KNOWN, { ...shared(KNOWN), [key(machine)]: this.agents });
+        } catch { this.failed = true; }
+        cx.notify();
+      });
+      return;
+    }
     if (edit) {
       const f = folders(machine).list.find((x) => x.id === edit) ?? { name: NEW_FOLDER };
-      this.editing = { id: edit, machine, fresh, parent, overlay };
+      this.editing = { id: edit, machine, fresh, parent: fresh ? parent : f.parent ?? null, overlay };
+      // Collecting from elsewhere than the project folder is rare: shown only when asked for, or already set so.
+      this.more = Boolean(f.match && f.match !== f.path);
       this.name = InputState.new({ value: f.name ?? "" });
       this.path = InputState.new({ value: f.path ?? "", placeholder: "e.g. ~/Documents/github.com/owner/repo" });
       this.match = InputState.new({ value: f.match ?? "", placeholder: "e.g. wbso-ai, ~/code/client-*" });
@@ -589,7 +620,7 @@ export default class Spaces extends View {
   // The system's folder picker, for this computer: home written as "~".
   choose(cx) {
     cx.spawn(async (cx) => {
-      const picked = await pickFolder({ prompt: "Start new spaces in" });
+      const picked = await pickFolder({ prompt: "Use as project folder" });
       if (!picked) return;
       this.path.set_value(picked.startsWith(home()) ? `~${picked.slice(home().length)}` : picked);
       if (this.mirror) this.match.set_value(this.path.value());
@@ -696,10 +727,38 @@ export default class Spaces extends View {
         .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
         .on_click((_e, cx) => { cx.stop_propagation(); this.newFolder(machine, f.id); }).when(true, (el) => this.lit(el, `folder-sub-${f.id}`, "folder-plus", 12, t)))
       .child(div().id(`folder-add-${f.id}`).flex_none().px(4).rounded(4).text_color(t.dim).hover((s) => s.bg(t.hover).text_color(t.foreground))
-        .tooltip("New space here")
-        .on_click((_e, cx) => { cx.stop_propagation(); newSpaceIn(machine, f.id); }).child("+"))
+        .tooltip("New terminal or agent here")
+        .on_click((_e, cx) => { cx.stop_propagation(); this.addMenu(machine, f.id); }).child("+"))
       .child(div().flex_none().text_size(11.5).text_color(t.dim).child(String(inside.length)))
       .child(svg(`mods/workspace-chrome/chevron-${f.folded ? "right" : "down"}.svg`).size(11).flex_none().text_color(t.dim));
+  }
+
+  addMenu(machine, id) {
+    const n = (shared(KNOWN)?.[key(machine)] ?? []).filter((a) => a.installed && !HIDDEN.has(a.key)).length;
+    openOverlay({ mod: "space-folders", kind: "popup", width: 230, height: Math.min(420, 90 + Math.max(n, 3) * 31), props: { addMenu: id, machine } });
+  }
+
+  addMenuView(t) {
+    const { id, machine, overlay } = this.adding;
+    const installed = this.agents.filter((a) => a.installed);
+    const go = (agent) => { closeOverlay(overlay); newSpaceIn(machine, id, agent); };
+    const row = (k, icon, name, hint, action) => h_flex().id(k).h(31).px(9).gap(10).rounded(7).items_center().flex_none()
+      .text_color(t.foreground).cursor_pointer().hover((s) => s.bg(t.selected)).on_click(action)
+      .child(icon).child(div().flex_1().truncate().child(name)).child(div().text_size(11).text_color(t.dim).child(hint));
+    const list = folders(machine).list, f = byId(list, id), path = f ? pathOf(list, f) : null;
+    return v_flex().id("folder-add-menu").w_full().p(5).bg(t.popover).text_color(t.foreground).text_size(12.8)
+      .track_focus(this.handle)
+      .on_key_down((e) => {
+        if (e.modifiers.control || e.modifiers.platform || e.modifiers.alt) return;
+        if (e.key === "t") go(null);
+        else if (/^[1-9]$/.test(e.key) && installed[Number(e.key) - 1]) go(installed[Number(e.key) - 1]);
+      })
+      .child(div().px(9).pt(4).pb(6).text_size(11).text_color(t.dim).truncate().child(path ? `In ${path}` : "No project folder: Edit folder… sets one"))
+      .child(row("add-terminal", svg("icons/shell.svg").size(14).text_color(t.foreground), "Terminal", "T", () => go(null)))
+      .child(div().px(9).pt(8).pb(4).text_size(11).text_color(t.dim).child("Start an agent"))
+      .children(installed.map((a, i) => row(`add-${a.key}`, a.tint ? svg(a.icon).size(14).text_color(t.foreground) : image(a.icon).size(14), a.name,
+        i < 9 ? String(i + 1) : "", () => go(a))))
+      .when(!installed.length, (el) => el.child(div().px(9).py(6).text_color(t.dim).child(this.failed ? "Could not check installed agents" : "Checking installed agents…")));
   }
 
   folderMenuView(t) {
@@ -725,7 +784,8 @@ export default class Spaces extends View {
   }
 
   editView(t) {
-    const { machine, overlay } = this.editing;
+    const { machine, overlay, parent, fresh } = this.editing;
+    const list = folders(machine).list, up = byId(list, parent), inherited = up ? pathOf(list, up) : null;
     const button = (key, label, primary, action) => h_flex().id(key).h(32).px(14).flex_none().items_center().rounded(8).border_1()
       .border_color(primary ? t.solid : t.input).bg(primary ? t.solid : t.raised).text_color(primary ? t.solid_foreground : t.foreground)
       .text_size(12.5).font_medium().cursor_pointer().hover((s) => s.opacity(0.88)).on_click(action).child(label);
@@ -738,12 +798,16 @@ export default class Spaces extends View {
       .when(Boolean(hint), (el) => el.child(div().text_size(11.5).text_color(t.dim).child(hint)));
     return v_flex().id("folder-edit").w_full().p(20).gap(16).bg(t.popover).text_color(t.foreground)
       .on_key_down((e, cx) => { if (e.key === "escape") { closeOverlay(overlay); cx.stop_propagation(); } })
-      .child(div().text_size(15).font_semibold().child("Edit folder"))
+      .child(div().text_size(15).font_semibold().child(fresh ? (up ? `New folder in ${up.name}` : "New folder") : "Edit folder"))
       .child(field("Name", this.name, null))
-      .child(field("Start new spaces in", this.path, "Its + and New space here open a space there.",
+      .child(field("Project folder", this.path,
+        `Its + opens a terminal or an agent here, and spaces working here go in this folder.${inherited ? ` Empty: ${inherited}, as ${up.name}.` : ""}`,
         machine ? null : button("folder-choose", "Choose…", false, (_e, cx) => this.choose(cx))))
-      .child(field("Collect spaces from", this.match,
-        "Spaces working in these folders join this one. Comma-separated: a folder name like wbso-ai, or a path like ~/code/client-*."))
+      .when(this.more, (el) => el.child(field("Collect spaces from", this.match,
+        "Spaces working in these folders go in this one, instead of the project folder. Comma-separated: a folder name like wbso-ai, a path like ~/code/client-*, or a machine's name.")))
+      .when(!this.more, (el) => el.child(div().id("folder-more").text_size(11.5).text_color(t.dim).cursor_pointer()
+        .hover((s) => s.text_color(t.foreground)).on_click((_e, cx) => { this.more = true; cx.notify(); })
+        .child("Collect spaces from other places too…")))
       .child(h_flex().pt(4).gap(8).justify_end()
         .child(button("folder-cancel", "Cancel", false, () => closeOverlay(overlay)))
         .child(button("folder-save", "Save", true, () => this.saveFolder())));
@@ -1006,6 +1070,7 @@ export default class Spaces extends View {
   render() {
     const t = theme();
     if (this.folderMenu) return this.folderMenuView(t);
+    if (this.adding) return this.addMenuView(t);
     if (this.editing) return this.editView(t);
     const collapsed = narrow();
     const palette = ["ansi6", "ansi3", "ansi4", "ansi5", "ansi2", "ansi1"];
