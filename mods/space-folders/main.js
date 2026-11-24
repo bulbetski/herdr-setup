@@ -420,6 +420,14 @@ export default class Spaces extends View {
     openOverlay({ mod: "menu", kind: "popup", width: 200, height: 260, props: { tab: "space", target: { id: w.id } } });
   }
 
+  // An icon button's icon, dark while the pointer is on the button: an svg doesn't
+  // take the color its parent's hover sets, so the button says when it's under the pointer.
+  lit(el, key, icon, size, t) {
+    return el
+      .on_hover((on, cx) => { if (on) this.hot = key; else if (this.hot === key) this.hot = null; cx.notify(); })
+      .child(svg(`mods/workspace-chrome/${icon}.svg`).size(size).text_color(this.hot === key ? t.foreground : t.dim));
+  }
+
   // ---- folders ----
 
   // Each machine's file, read again; a newer copy here (a save on its way) wins.
@@ -686,7 +694,7 @@ export default class Spaces extends View {
       .child(div().id(`folder-sub-${f.id}`).flex_none().px(3).rounded(4).text_color(t.dim).hover((s) => s.bg(t.hover).text_color(t.foreground))
         .tooltip("New subfolder")
         .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
-        .on_click((_e, cx) => { cx.stop_propagation(); this.newFolder(machine, f.id); }).child(svg("mods/workspace-chrome/folder-plus.svg").size(12)))
+        .on_click((_e, cx) => { cx.stop_propagation(); this.newFolder(machine, f.id); }).when(true, (el) => this.lit(el, `folder-sub-${f.id}`, "folder-plus", 12, t)))
       .child(div().id(`folder-add-${f.id}`).flex_none().px(4).rounded(4).text_color(t.dim).hover((s) => s.bg(t.hover).text_color(t.foreground))
         .tooltip("New space here")
         .on_click((_e, cx) => { cx.stop_propagation(); newSpaceIn(machine, f.id); }).child("+"))
@@ -818,7 +826,7 @@ export default class Spaces extends View {
       .when(!collapsed, el => el.child(div().flex_1().truncate().child(m ?? "This computer"))
         .when(!connected, el => el.child(div().flex_none().child((machine?.state ?? "asleep").replace(/_/g, " "))))
         .when(connected, el => el.child(div().id(`machine-folder-${m ?? "local"}`).flex_none().px(3).rounded(4).hover(s => s.bg(t.hover).text_color(t.foreground))
-          .on_click((_e, cx) => { cx.stop_propagation(); this.newFolder(m); }).child(svg("mods/workspace-chrome/folder-plus.svg").size(12))))
+          .on_click((_e, cx) => { cx.stop_propagation(); this.newFolder(m); }).when(true, (el) => this.lit(el, `machine-folder-${m ?? "local"}`, "folder-plus", 12, t))))
         .when(connected, el => el.child(div().id(`machine-add-${m ?? "local"}`).flex_none().px(4).rounded(4).hover(s => s.bg(t.hover).text_color(t.foreground))
           .on_click((_e, cx) => { cx.stop_propagation(); newSpaceIn(m, null); }).child("+")))
         .when(Boolean(m) && !connected, el => el.child(div().id(`machine-reconnect-${m}`).flex_none().px(3).rounded(4)
@@ -1021,7 +1029,7 @@ export default class Spaces extends View {
     const leaving = lifting || Boolean(dragged && folderOf(dragged, folders(dragged.machine ?? null), panes()));
     this.agentShown = Boolean(agent);
     const button = (id, icon, action) => div().id(id).size(26).flex_none().flex().items_center().justify_center().rounded(6).cursor_pointer()
-      .hover(s => s.text_color(t.foreground)).on_click(action).child(svg(`mods/workspace-chrome/${icon}.svg`).size(14));
+      .on_click(action).when(true, (el) => this.lit(el, id, icon, 14, t));
     const seen = [], rows = this.grouped(t, collapsed, seen);
     this.seen = seen;
     this.publish();
