@@ -70,12 +70,6 @@ function depthOf(list, id) {
 }
 // Folders in the order the sidebar shows them: each followed by what's in it.
 const treeOrder = (list) => below(list, null).map((id) => byId(list, id));
-// "Work / Client": a folder's name after the names of the folders it's in.
-function pathName(list, x) {
-  const names = [x.name];
-  for (let p = byId(list, parentOf(list, x)); p; p = byId(list, parentOf(list, p))) names.unshift(p.name);
-  return names.join(" / ");
-}
 // An agent being dragged out of agents-plus: { space, machine, address }.
 const carried = () => shared("agents.drag") ?? null;
 
@@ -689,7 +683,12 @@ export default class Spaces extends View {
       // Folded, it still says when something in it is running or needs you.
       .when(f.folded && status === "working", (el) => el.child(svg("mods/workspace-chrome/spinner.svg").size(11).flex_none().text_color(t.working).spin(900)))
       .when(f.folded && Boolean(status) && status !== "working", (el) => el.child(div().flex_none().text_color(tone(t, status)).child(glyph(status))))
+      .child(div().id(`folder-sub-${f.id}`).flex_none().px(3).rounded(4).text_color(t.dim).hover((s) => s.bg(t.hover).text_color(t.foreground))
+        .tooltip("New subfolder")
+        .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+        .on_click((_e, cx) => { cx.stop_propagation(); this.newFolder(machine, f.id); }).child(svg("mods/workspace-chrome/folder-plus.svg").size(12)))
       .child(div().id(`folder-add-${f.id}`).flex_none().px(4).rounded(4).text_color(t.dim).hover((s) => s.bg(t.hover).text_color(t.foreground))
+        .tooltip("New space here")
         .on_click((_e, cx) => { cx.stop_propagation(); newSpaceIn(machine, f.id); }).child("+"))
       .child(div().flex_none().text_size(11.5).text_color(t.dim).child(String(inside.length)))
       .child(svg(`mods/workspace-chrome/chevron-${f.folded ? "right" : "down"}.svg`).size(11).flex_none().text_color(t.dim));
@@ -839,9 +838,9 @@ export default class Spaces extends View {
   }
 
   // Which folder each space shows under, for other mods (agents-plus groups agents by it):
-  // shared "space-folders.placed" = { groups: [{ id, name, color, machine, folder }], of: { spaceId: groupId } }.
-  // Every folder is a group of its own, in the sidebar's order, named with the folders it's in
-  // ("Work / Client"). A space of another machine goes to the folder here that takes that machine
+  // shared "space-folders.placed" = { groups: [{ id, name, color, machine, folder, parent, depth }], of: { spaceId: groupId } }.
+  // Every folder is a group of its own, in the sidebar's order, with the group it's in
+  // (`parent`, null at the top) and how deep (`depth`, 0 at the top). A space of another machine goes to the folder here that takes that machine
   // in, else to that machine's own folder, else under the machine's name. `machine` and `folder`
   // say where a space dropped on the group goes (a space of that machine only; folder null: out
   // of its folder); a folder here that takes in another machine takes no drops for it.
@@ -849,12 +848,12 @@ export default class Spaces extends View {
   publish() {
     const rows = this.ordered(), ps = panes();
     const groups = [], of = {};
-    const group = (id, name, color, machine, folder) => {
-      if (!groups.some((g) => g.id === id)) groups.push({ id, name, color: color ?? null, machine: machine ?? null, folder: folder ?? null });
+    const group = (id, name, color, machine, folder, parent = null, depth = 0) => {
+      if (!groups.some((g) => g.id === id)) groups.push({ id, name, color: color ?? null, machine: machine ?? null, folder: folder ?? null, parent, depth });
       return id;
     };
     const local = folders(null).list;
-    for (const f of treeOrder(local)) group(f.id, pathName(local, f), f.color, null, f.id);
+    for (const f of treeOrder(local)) group(f.id, f.name, f.color, null, f.id, parentOf(local, f), depthOf(local, f.id));
     const place = (mine, list, host) => {
       let parent = null;
       for (const r of mine) {
@@ -870,7 +869,11 @@ export default class Spaces extends View {
       const mine = rows.filter((r) => r.w.machine === m);
       const housed = machineFolder(m, mine, ps);
       const theirs = folders(m).list;
-      place(mine, folders(m), (own) => housed ?? (own ? group(`${m}/${own.id}`, pathName(theirs, own), own.color, m, own.id) : group(`machine:${m}`, m, null, m, null)));
+      if (!housed) for (const f of treeOrder(theirs)) {
+        const up = parentOf(theirs, f);
+        group(`${m}/${f.id}`, f.name, f.color, m, f.id, up && `${m}/${up}`, depthOf(theirs, f.id));
+      }
+      place(mine, folders(m), (own) => housed ?? (own ? `${m}/${own.id}` : group(`machine:${m}`, m, null, m, null)));
     }
     const next = { groups, of };
     if (JSON.stringify(next) !== JSON.stringify(shared("space-folders.placed") ?? null)) setShared("space-folders.placed", next);

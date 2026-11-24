@@ -1,6 +1,7 @@
 // Modified from Herdr's built-in `agents` mod (github.com/herdrdev/herdr-app, Apache-2.0, see LICENSE here).
 // Changed: a third sort, the default, "Grouped by folder": the sidebar's folders (space-folders publishes where each
-// space sits), each with its own Needs you / Done / Working / Idle sections. An agent dragged onto another
+// space sits), as a tree: a subfolder under its folder, folded with it; in a folder the most urgent agents
+// first. An agent dragged onto another
 // folder's header or agents (here, or onto a folder in the sidebar) moves its space, with every agent in it, there.
 // Agents in grouped or priority views; parents take their most urgent sub-agent's place.
 
@@ -62,9 +63,11 @@ const SORTS = [
   { id: "grouped", label: "Grouped by space", icon: "layers" },
   { id: "folders", label: "Grouped by folder", icon: "folder" },
 ];
-// Where space-folders put each space: { groups: [{ id, name, color, machine, folder }], of: { spaceId: groupId } }.
+// Where space-folders put each space: { groups: [{ id, name, color, machine, folder, parent, depth }], of: { spaceId: groupId } }.
 const placed = () => shared("space-folders.placed") ?? { groups: [], of: {} };
-const OTHER = { id: "other", name: "Other", color: null, machine: null, folder: null };
+const OTHER = { id: "other", name: "Other", color: null, machine: null, folder: null, parent: null, depth: 0 };
+// A subfolder's header and agents sit this much further in per level.
+const LEVEL = 14;
 // The agent being dragged, for space-folders to take too: { space, machine, address }.
 const DRAG = "agents.drag";
 // Its own key, so the built-in mod's saved choice doesn't override the default here: by folder.
@@ -186,14 +189,14 @@ export default class Agents extends View {
     });
   }
 
-  subRow(t, s, shown, compact) {
+  subRow(t, s, shown, compact, inset = 0) {
     const k = s.t;
     const st = kidStatus(k, this.listed);
     const pic = icon(k.program, 14, t.foreground);
     const on = k.address === shown;
     return h_flex()
       .id(`sub-${k.address}`)
-      .pl(39)
+      .pl(39 + inset)
       .pr(8)
       .rounded(8)
       .h(26)
@@ -260,7 +263,7 @@ export default class Agents extends View {
       const subs = collapsed ? [] : this.tree(all, a.address);
       const r = row(a, i, subs);
       if (this.folded.has(a.address)) return [r];
-      return [r, ...subs.map((s) => this.subRow(t, s, shown, byPriority))];
+      return [r, ...subs.map((s) => this.subRow(t, s, shown, byPriority, inset(a)))];
     };
 
     // The fold chevron; folded, the count too, colored by the most urgent one.
@@ -353,6 +356,7 @@ export default class Agents extends View {
       return h_flex()
         .id(`ag-${a.address}`)
         .px(8)
+        .pl(8 + inset(a))
         .h(30)
         .flex_none()
         .rounded(8)
@@ -391,7 +395,7 @@ export default class Agents extends View {
         .when(subs.length > 0, el => el.child(fold(a, subs)))
         .when(this.hovered === a.address, el => el.child(pin))
         .when(this.hovered !== a.address && Boolean(when), el => el.child(div().flex_none().text_size(11).text_color(t.dim).child(duration(now - when))))
-        .child(this.status(t, a, (byPriority || byFolder) && !isPinned));
+        .child(this.status(t, a, byPriority && !isPinned));
     };
 
     // Groups in list order: spaces (grouped) or priority sections. Agents of a
@@ -401,26 +405,32 @@ export default class Agents extends View {
     const drag = this.drag && shared(DRAG)?.address === this.drag.address ? this.drag : null;
     const takes = (g) => Boolean(drag && byFolder && g?.id?.startsWith("fo-")
       && (g.machine ?? null) === drag.machine && g.id !== drag.from);
-    for (const a of rest) {
-      const r = rankOf(a) || RANK.idle;
-      const folder = byFolder ? folderOf(a) : null;
-      const id = byPriority ? `sec-${r}` : byFolder ? `fo-${folder.id}` : `sp-${a.space}`;
-      if (groups.at(-1)?.id === id) groups.at(-1).members.push(a);
-      else groups.push({ id, label: byPriority ? SECTION[r] : byFolder ? folder.name : a.space_name || "", status: byPriority ? SECTION_STATUS[r] : null, color: folder?.color ?? null, machine: folder?.machine ?? null, folder: folder?.folder ?? null, members: [a] });
-    }
-    // While an agent is dragged, by folder, the folders it could go to show too, empty or not.
-    if (byFolder && drag) {
+    if (byFolder) {
+      // Every folder in the sidebar's order, with the agents in it and in the folders in it;
+      // shown when any agent is in there, or while an agent dragged could go there.
       const all = [...where.groups, OTHER];
-      for (const [n, f] of all.entries()) {
-        const id = `fo-${f.id}`;
-        if (groups.some((g) => g.id === id) || !takes({ id, machine: f.machine ?? null, folder: f.folder ?? null })) continue;
-        const after = all.slice(0, n).map((x) => `fo-${x.id}`);
-        let at = 0;
-        groups.forEach((g, k) => { if (g.id === "pinned" || after.includes(g.id)) at = k + 1; });
-        groups.splice(at, 0, { id, label: f.name, status: null, color: f.color ?? null, machine: f.machine ?? null, folder: f.folder ?? null, members: [] });
+      const own = new Map(all.map((f) => [f.id, []]));
+      for (const a of rest) own.get(folderOf(a).id)?.push(a);
+      const sub = (f) => [...own.get(f.id), ...all.filter((k) => k.parent === f.id).flatMap(sub)];
+      for (const f of all) {
+        const g = { id: `fo-${f.id}`, label: f.name, status: null, color: f.color ?? null, machine: f.machine ?? null, folder: f.folder ?? null,
+          parent: f.parent ? `fo-${f.parent}` : null, depth: f.depth ?? 0, members: own.get(f.id), all: sub(f) };
+        if (g.all.length || takes(g)) groups.push(g);
       }
+    } else for (const a of rest) {
+      const r = rankOf(a) || RANK.idle;
+      const id = byPriority ? `sec-${r}` : `sp-${a.space}`;
+      if (groups.at(-1)?.id === id) groups.at(-1).members.push(a);
+      else groups.push({ id, label: byPriority ? SECTION[r] : a.space_name || "", status: byPriority ? SECTION_STATUS[r] : null, color: null, members: [a] });
     }
+    // A folder in a folded one doesn't show; its parent may not show itself (nothing in it but this).
+    const parents = new Map(where.groups.map((f) => [`fo-${f.id}`, f.parent ? `fo-${f.parent}` : null]));
+    const shut = (g) => {
+      for (let p = g.parent, n = 0; p && n < 50; p = parents.get(p), n++) if (this.folded.has(p)) return true;
+      return false;
+    };
     const groupOf = new Map(groups.flatMap((g) => g.id === "pinned" ? [] : g.members.map((a) => [a.address, g])));
+    const inset = (a) => (byFolder && !a.pinned ? (groupOf.get(a.address)?.depth ?? 0) * LEVEL : 0);
     // Over a group (its header, a section or an agent of it) while dragging: that group lights up.
     // `e` marks the move as taken, so the list under it (moved over too) leaves `over` alone.
     const aimAt = (g, cx, e) => {
@@ -436,11 +446,13 @@ export default class Agents extends View {
     // A group's header; it folds the group. Folded, it says how many and the most urgent state.
     const header = (g) => {
       const open = !this.folded.has(g.id);
-      const top = g.members.reduce((m, a) => ((RANK[a.status] ?? 0) > (RANK[m] ?? 0) ? a.status : m), null);
+      const inside = g.all ?? g.members;
+      const top = inside.reduce((m, a) => ((RANK[a.status] ?? 0) > (RANK[m] ?? 0) ? a.status : m), null);
       const lit = Boolean(drag) && this.over === g.id;
       return h_flex()
         .id(g.id)
         .px(8)
+        .pl(8 + (g.depth ?? 0) * LEVEL)
         .mt(lit ? 4 : 0)
         .pt(lit ? 4 : 8)
         .h(lit ? 26 : 30)
@@ -460,52 +472,14 @@ export default class Agents extends View {
         })
         .when(Boolean(g.color), (el) => el.child(div().size(7).flex_none().rounded(2).bg(g.color?.startsWith("#") ? g.color : t[g.color] ?? t.dim)))
         .child(div().truncate().text_color(t[g.status] ?? (byFolder && g.id !== "pinned" ? t.muted : t.dim)).when(byFolder, (el) => el.font_semibold()).child(g.label))
-        .when(byPriority || byFolder || !open, (el) => el.child(div().text_color(t.dim).child(String(g.members.length))))
+        .when(byPriority || byFolder || !open, (el) => el.child(div().text_color(t.dim).child(String(inside.length))))
         .child(div().flex_1())
         .when(!open, (el) => el
           .when(!byPriority && top && top !== "idle", (el) => el.child(this.status(t, { status: top }, true)))
           .child(svg("mods/workspace-chrome/chevron-right.svg").size(11).flex_none().text_color(t.dim)));
     };
-    // By folder, a folder's agents in priority sections of their own (members are sorted by urgency).
-    const sections = (g) => {
-      const out = [];
-      for (const a of g.members) {
-        const r = rankOf(a) || RANK.idle;
-        if (out.at(-1)?.r === r) out.at(-1).members.push(a);
-        else out.push({ id: `${g.id}-sec-${r}`, r, label: SECTION[r], status: SECTION_STATUS[r] ?? null, members: [a] });
-      }
-      return out;
-    };
-    // A section's header under a folder: smaller, indented, folds the section.
-    const subheader = (g, s) => {
-      const open = !this.folded.has(s.id);
-      return h_flex()
-        .id(s.id)
-        .pl(22)
-        .pr(8)
-        .h(22)
-        .flex_none()
-        .gap(5)
-        .items_center()
-        .text_size(10.5)
-        .cursor_pointer()
-        .hover((el) => el.text_color(t.foreground))
-        .on_mouse_move((e, cx) => aimAt(g, cx, e))
-        .on_click((_e, cx) => {
-          open ? this.folded.add(s.id) : this.folded.delete(s.id);
-          cx.notify();
-        })
-        .child(div().text_color(t[s.status] ?? t.dim).child(s.label))
-        .child(div().text_color(t.dim).child(String(s.members.length)))
-        .child(div().flex_1())
-        .when(!open, (el) => el.child(svg("mods/workspace-chrome/chevron-right.svg").size(10).flex_none().text_color(t.dim)));
-    };
-    const body = (g) => {
-      if (this.folded.has(g.id)) return [];
-      if (!byFolder || g.id === "pinned") return g.members.flatMap(withKids);
-      return sections(g).flatMap((s) => [subheader(g, s), ...(this.folded.has(s.id) ? [] : s.members.flatMap(withKids))]);
-    };
-    const rows = collapsed ? list.flatMap(withKids) : groups.flatMap((g) => [header(g), ...body(g)]);
+    const body = (g) => (this.folded.has(g.id) ? [] : g.members.flatMap(withKids));
+    const rows = collapsed ? list.flatMap(withKids) : groups.flatMap((g) => shut(g) ? [] : [header(g), ...body(g)]);
 
     // Let go here: onto the folder it's over, if any; a press anywhere else ends a drag let go of outside.
     const endDrag = (cx) => {
