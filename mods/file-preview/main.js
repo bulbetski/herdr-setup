@@ -299,6 +299,7 @@ export default class FilePreview extends View {
     this.inInput = false;   // the key on its way up came from a search field
     this.cursor = null;     // keyboard row (rel path)
     this.file = null;       // shown file (rel path)
+    this.downloading = new Set();   // remote paths on their way to ~/Downloads
     this.doc = null;        // what readSource returned, plus segments for Markdown
     this.raw = new Set();   // .mmd / .svg files shown as source text (Source in the top bar)
     this.code = null;       // EditorState of a code/text file
@@ -1675,9 +1676,10 @@ export default class FilePreview extends View {
     const last = this.undo[this.undo.length - 1], undo = last ? [[`Undo ${last.label}`, "undo", "⌘Z"], "-"] : [];
     const paths = [["Open in terminal", "terminal"], ["Copy path", "copypath"], ["Copy relative path", "copyrel"], ["Insert path into terminal", "insert"],
       ...(local ? [["Reveal in Finder", "reveal"]] : [])];
+    const pull = local || rel === "" ? [] : [["Download to Mac", "download"], "-"];
     let items;
     if (rel === "") items = [...undo, ["New file…", "newfile"], ["New folder…", "newdir"], ...paste, "-", ...paths];
-    else items = [...undo, ...(dir ? [["New file…", "newfile"], ["New folder…", "newdir"], "-"] : [["Open", "open"], "-"]),
+    else items = [...undo, ...(dir ? [["New file…", "newfile"], ["New folder…", "newdir"], "-"] : [["Open", "open"], "-"]), ...pull,
       ["Rename…", "rename", "F2"], ["Duplicate", "duplicate", "⌘D"], ["Copy", "copy", "⌘C"], ["Cut", "cut", "⌘X"], ...paste, "-",
       ...paths, "-", ["Move to Trash", "delete", "⌘⌫"]];
     const h = items.reduce((n, it) => n + (it === "-" ? 9 : MENU_ROW), 10);
@@ -1721,6 +1723,7 @@ export default class FilePreview extends View {
       case "copypath": cx.write_to_clipboard(abs); this.say(`Copied the path ${tilde(abs)}`); break;
       case "copyrel": cx.write_to_clipboard(rel || "."); this.say(`Copied the path ${rel || "."}`); break;
       case "insert": this.insertPath(abs, cx); break;
+      case "download": this.download(rel, cx); break;
       case "terminal": this.openTerminal(this.tree.abs(folder)); break;
       case "reveal": exec("open", ["-R", abs]).catch(() => {}); break;
     }
@@ -1743,6 +1746,35 @@ export default class FilePreview extends View {
     cx?.spawn(async () => {
       clip.pb = mode === "copy" && !clip.on ? await ops.pbWriteFiles([clip.abs]) : (await ops.pbRead())?.n ?? null;
     });
+  }
+
+  /**
+   * A file or folder of the remote machine into ~/Downloads on this computer, with scp. A taken
+   * name gets " copy" (as a paste does), so nothing there is overwritten.
+   */
+  download(rel, cx) {
+    const on = this.ctx?.on ?? null, abs = this.tree.abs(rel), name = ops.basename(abs);
+    if (!on || !rel || this.downloading.has(abs)) return;
+    this.downloading.add(abs);
+    this.say(`Downloading ${name}…`);
+    cx?.notify();
+    cx?.spawn(async (cx) => {
+      const dir = home() + "/Downloads";
+      const free = await ops.freeName(dir, name, null);
+      const r = free ? await ops.transfer({ path: abs, on }, { path: `${dir}/${free}`, on: null }) : { ok: false, error: "No free name in ~/Downloads" };
+      this.downloading.delete(abs);
+      this.say(r.ok ? `Downloaded ${name} to ~/Downloads${free !== name ? ` as ${free}` : ""}` : `Couldn't download ${name}: ${r.error}`, r.ok ? "info" : "error");
+      cx.notify();
+    });
+  }
+
+  /** The download button: a remote row's or the shown remote file's. */
+  downloadButton(id, rel, t) {
+    const busy = this.downloading.has(this.tree.abs(rel));
+    return h_flex().id(id).size(18).flex_none().rounded(4).items_center().justify_center().cursor_pointer()
+      .hover((s) => s.bg(t.hover)).tooltip(busy ? "Downloading…" : "Download to ~/Downloads on this Mac")
+      .on_mouse_down("left", (_e, cx) => { cx.stop_propagation(); this.download(rel, cx); })
+      .child(svg(ICON + "download.svg").size(13).text_color(busy ? t.accent : t.muted));
   }
 
   /** A new terminal tab of the active space in that folder (of a file: its folder). */
@@ -2601,6 +2633,7 @@ export default class FilePreview extends View {
           .text_color(this.textZoom === 1 ? t.dim : t.foreground).on_click((_e, cx) => this.textAct("reset", cx))
           .child(`${Math.round(this.textZoom * 100)}%`))
         .child(this.textButton("fp-text-in", "A+", t, (_e, cx) => this.textAct("in", cx))))
+      .when(Boolean(on && this.mode !== "tree" && this.file && !this.commitShown()), (el) => el.child(this.downloadButton("fp-download", this.file, t)))
       .child(this.button("fp-reload", "reload.svg", t, (_e, cx) => this.reload(cx)))
       .when(Boolean(this.overlay) && sideAvailable(), (el) => el.child(this.button("fp-anchor", "anchor.svg", t, () => this.anchor())))
       .when(this.mode === "side", (el) => el.child(this.button("fp-popout", "expand.svg", t, () => this.popOut())))
@@ -2629,7 +2662,9 @@ export default class FilePreview extends View {
       .child(div().flex_1().min_w(0).truncate().when(shownHere, (el) => el.font_semibold()).text_color(r.denied ? t.dim : tint ?? (shownHere ? t.accent : t.foreground)).child(r.name))
       .when(r.denied, (el) => el.child(div().flex_none().text_size(11).text_color(t.dim).child("no access")))
       .when(Boolean(tint) && !r.dir, (el) => el.child(div().w(12).flex_none().text_center().text_size(11).font_medium().text_color(tint).child(g)))
-      .when(Boolean(tint) && r.dir, (el) => el.child(h_flex().w(12).flex_none().justify_center().child(div().size(5).rounded_full().bg(tint))));
+      .when(Boolean(tint) && r.dir, (el) => el.child(h_flex().w(12).flex_none().justify_center().child(div().size(5).rounded_full().bg(tint))))
+      .when(Boolean(this.ctx?.on && this.canEdit && !r.denied && (r.path === this.cursor || this.downloading.has(this.tree.abs(r.path)))), (el) =>
+        el.child(this.downloadButton(`fp-row-dl:${r.path}`, r.path, t)));
     return plain ? this.rowDrag(el.id(`fp-row:${r.path}`).on_click((_e, cx) => this.click(r.path, cx)), r) : el;
   }
 

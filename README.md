@@ -62,7 +62,7 @@ git checkout -t origin/main
 
 | Мод | Откуда | Что делает |
 |---|---|---|
-| `file-preview`, `file-preview-panel` | [bborrero14/herdr-file-preview](https://github.com/bborrero14/herdr-file-preview), сильно переделан | Explorer: дерево файлов, просмотр и правка во вкладке |
+| `file-preview`, `file-preview-panel` | [bborrero14/herdr-file-preview](https://github.com/bborrero14/herdr-file-preview), сильно переделан | Explorer: дерево файлов, просмотр и правка во вкладке; файл или папку с другой машины качает в `~/Downloads` этого компьютера (кнопка на выбранной строке, над открытым файлом и пункт Download to Mac в меню) |
 | `space-folders` | [jankeesvw/herdr-space-folders](https://github.com/jankeesvw/herdr-space-folders), доработан | Папки спейсов в сайдбаре, кнопка ↻ у машины без связи; пишет в shared `space-folders.placed`, в какой папке какой спейс (по нему группирует `agents-plus`) |
 | `herdr-md` | [ryanthedev/herdr-md](https://github.com/ryanthedev/herdr-md), без правок | `mdh open файл.md`: Markdown с Mermaid |
 | `usage-limits` | [nozikov/herdr-usage-limits](https://github.com/nozikov/herdr-usage-limits), без правок | Лимиты Claude и Codex |
