@@ -1021,7 +1021,7 @@ export default class Spaces extends View {
     const leaving = lifting || Boolean(dragged && folderOf(dragged, folders(dragged.machine ?? null), panes()));
     this.agentShown = Boolean(agent);
     const button = (id, icon, action) => div().id(id).size(26).flex_none().flex().items_center().justify_center().rounded(6).cursor_pointer()
-      .hover(s => s.bg(t.hover).text_color(t.foreground)).on_click(action).child(svg(`mods/workspace-chrome/${icon}.svg`).size(14));
+      .hover(s => s.text_color(t.foreground)).on_click(action).child(svg(`mods/workspace-chrome/${icon}.svg`).size(14));
     const seen = [], rows = this.grouped(t, collapsed, seen);
     this.seen = seen;
     this.publish();
@@ -1031,7 +1031,7 @@ export default class Spaces extends View {
         .child(h_flex().gap(2)
           .when(!collapsed, el => el.child(div().id("machine-add").h(26).px(6).flex_none().flex().items_center().rounded(6)
             .font_family(settings().font_family || "JetBrains Mono").text_size(10.5).font_medium()
-            .cursor_pointer().hover(s => s.bg(t.hover).text_color(t.foreground)).tooltip("Add machine")
+            .cursor_pointer().hover(s => s.text_color(t.foreground)).tooltip("Add machine")
             .on_click(() => run("mod.open", { name: "machine-add-plus" })).child("+ssh")))
           .when(!collapsed, el => el.child(button("folder-new", "folder-plus", () => this.newFolder(null)).tooltip("New folder")))
           .child(button("space-new", "plus", () => newSpaceIn(undefined, null)).tooltip("New space"))))
