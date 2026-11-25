@@ -741,23 +741,29 @@ export default class Spaces extends View {
   addMenuView(t) {
     const { id, machine, overlay } = this.adding;
     const installed = this.agents.filter((a) => a.installed);
-    const go = (agent) => { closeOverlay(overlay); newSpaceIn(machine, id, agent); };
+    // Closing the popup cancels its unfinished tasks, and newSpaceIn awaits the machine's
+    // home for a "~" folder: close only once space.new has gone out.
+    const go = (agent, cx) => {
+      if (this.starting) return;
+      this.starting = true;
+      cx.spawn(async () => { try { await newSpaceIn(machine, id, agent); } finally { closeOverlay(overlay); } });
+    };
     const row = (k, icon, name, hint, action) => h_flex().id(k).h(31).px(9).gap(10).rounded(7).items_center().flex_none()
-      .text_color(t.foreground).cursor_pointer().hover((s) => s.bg(t.selected)).on_click(action)
+      .text_color(t.foreground).cursor_pointer().hover((s) => s.bg(t.selected)).on_click((_e, cx) => action(cx))
       .child(icon).child(div().flex_1().truncate().child(name)).child(div().text_size(11).text_color(t.dim).child(hint));
     const list = folders(machine).list, f = byId(list, id), path = f ? pathOf(list, f) : null;
     return v_flex().id("folder-add-menu").w_full().p(5).bg(t.popover).text_color(t.foreground).text_size(12.8)
       .track_focus(this.handle)
-      .on_key_down((e) => {
+      .on_key_down((e, cx) => {
         if (e.modifiers.control || e.modifiers.platform || e.modifiers.alt) return;
-        if (e.key === "t") go(null);
-        else if (/^[1-9]$/.test(e.key) && installed[Number(e.key) - 1]) go(installed[Number(e.key) - 1]);
+        if (e.key === "t") go(null, cx);
+        else if (/^[1-9]$/.test(e.key) && installed[Number(e.key) - 1]) go(installed[Number(e.key) - 1], cx);
       })
       .child(div().px(9).pt(4).pb(6).text_size(11).text_color(t.dim).truncate().child(path ? `In ${path}` : "No project folder: Edit folder… sets one"))
-      .child(row("add-terminal", svg("icons/shell.svg").size(14).text_color(t.foreground), "Terminal", "T", () => go(null)))
+      .child(row("add-terminal", svg("icons/shell.svg").size(14).text_color(t.foreground), "Terminal", "T", (cx) => go(null, cx)))
       .child(div().px(9).pt(8).pb(4).text_size(11).text_color(t.dim).child("Start an agent"))
       .children(installed.map((a, i) => row(`add-${a.key}`, a.tint ? svg(a.icon).size(14).text_color(t.foreground) : image(a.icon).size(14), a.name,
-        i < 9 ? String(i + 1) : "", () => go(a))))
+        i < 9 ? String(i + 1) : "", (cx) => go(a, cx))))
       .when(!installed.length, (el) => el.child(div().px(9).py(6).text_color(t.dim).child(this.failed ? "Could not check installed agents" : "Checking installed agents…")));
   }
 
@@ -771,7 +777,10 @@ export default class Spaces extends View {
       .hover((s) => s.border_color(t.muted)).on_click(() => { this.paint(machine, id, color); closeOverlay(overlay); });
     return v_flex().id("folder-menu").size_full().p(5).gap(1).bg(t.popover).text_color(t.foreground).text_size(12.5)
       .child(h_flex().px(8).pt(6).pb(8).gap(6).items_center().children([null, ...Object.keys(MARK)].map(swatch)))
-      .child(item("folder-space", "New space here", () => newSpaceIn(machine, id)))
+      // Not item(): closing first would cancel newSpaceIn while it awaits the machine's home.
+      .child(div().id("folder-space").h(30).px(10).flex().items_center().rounded(6).cursor_pointer()
+        .hover((s) => s.bg(t.hover)).child("New space here")
+        .on_click((_e, cx) => cx.spawn(async () => { try { await newSpaceIn(machine, id); } finally { closeOverlay(overlay); } })))
       .child(item("folder-sub", "New subfolder…", () => this.newFolder(machine, id)))
       .child(item("folder-edit", "Edit folder…", () => openOverlay({ mod: "space-folders", kind: "dialog", width: 460, props: { edit: id, machine } })))
       // What was in it, folders and spaces, goes to the folder it was in (at the top: spaces back to the rules).
