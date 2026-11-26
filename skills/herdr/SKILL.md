@@ -37,7 +37,9 @@ starts the preset's agents there; nobody reports back to you.
 herdr-task start --ns <ns> --yt ABC-123 [--preset pair] [--repos a,b] [--context /path/one,/path/two]
 # tracker attachments (all by default; --attachments id1,id2 picks, --attachments '' none) go to context/youtrack/,
 # comments to TASK.md (--no-comments); images reach every agent with its first message
-herdr-task start --ns <ns> --title "..." --desc "..." --repos <repo> --preset solo
+herdr-task start --ns <ns> --title "..." --desc "..." --repos <repo> --preset solo [--key ABC-123]
+# without a key the task is named after its title (`herdr-task ls` shows the name to open it by), commits get no
+# [KEY] prefix and the agent names and makes the branch itself before its first commit
 herdr-task ls              # tasks of every namespace, JSON
 herdr-task open KEY        # show its space, or open it again with the agents continuing
 herdr-task edit KEY --add-repo <repo> --rm-repo <repo> [--force] --add-context /path --rm-context /path

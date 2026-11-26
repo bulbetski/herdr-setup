@@ -8,6 +8,8 @@ agents talk to each other with `hc send`; their addresses are in team.json.
 
   herdr-task start --ns work --yt PROJ-123 [--preset pair] [--repos a,b] [--context p1,p2]
   herdr-task start --ns personal --title "..." --desc "..." --repos a,b --team impl=claude:opus,review=claude:sonnet
+  (--key is optional: without it the task is named after its title, has no [KEY] in commits, and its agent makes
+   the branch itself; KEY below is then that name, as `herdr-task ls` shows it)
   herdr-task open KEY            show its space, or open it again with the agents continuing
   herdr-task edit KEY [--add-repo X] [--rm-repo X [--force]] [--add-context P] [--rm-context P]   change what the task
                                  works on; TASK.md's lists follow and the agents are told
@@ -127,13 +129,16 @@ def parse_remote(url):
 
 
 def add_worktree(clone, d, branch):
-    """The task branch of one clone, checked out in <task>/<repo>."""
+    """The task branch of one clone, checked out in <task>/<repo>. A task without a key has no branch until its
+    agent makes one: the worktree then stands on origin/<base>, detached."""
     name, path = clone["name"], clone["path"]
     git(path, "fetch", "--quiet", "origin", timeout=180)
     base = base_of(path)
     wt = os.path.join(d, name)
-    has = git(path, "show-ref", "--verify", "--quiet", "refs/heads/" + branch)[0] == 0
-    if has:
+    has = bool(branch) and git(path, "show-ref", "--verify", "--quiet", "refs/heads/" + branch)[0] == 0
+    if not branch:
+        code, _, err = git(path, "worktree", "add", "--detach", wt, "origin/" + base)
+    elif has:
         code, _, err = git(path, "worktree", "add", wt, branch)
     else:
         code, _, err = git(path, "worktree", "add", "--no-track", "-b", branch, wt, "origin/" + base)
@@ -144,7 +149,8 @@ def add_worktree(clone, d, branch):
 
 
 ADD_REPO_SH = r"""#!/bin/sh
-# Adds a repo to this task: a worktree of the task branch in ./<name>, recorded in meta.json.
+# Adds a repo to this task: a worktree of the task branch in ./<name>, recorded in meta.json (no branch in
+# meta.json yet: the worktree stands on origin/<base>, detached).
 #   ./add-repo.sh rate-service      (a clone's name, or its full path)
 set -eu
 exec python3 - "$(cd "$(dirname "$0")" && pwd)" "$@" <<'EOF'
@@ -164,25 +170,35 @@ if any(r["name"] == name for r in meta["repos"]): sys.exit("%s is already in the
 run("git", "-C", path, "fetch", "--quiet", "origin")
 base = next((b for b in ("main", "master") if run("git", "-C", path, "show-ref", "--verify", "--quiet", "refs/remotes/origin/" + b).returncode == 0), "main")
 wt = os.path.join(d, name)
-has = run("git", "-C", path, "show-ref", "--verify", "--quiet", "refs/heads/" + meta["branch"]).returncode == 0
-r = run("git", "-C", path, "worktree", "add", wt, meta["branch"]) if has else run("git", "-C", path, "worktree", "add", "--no-track", "-b", meta["branch"], wt, "origin/" + base)
+br = meta.get("branch") or ""
+has = bool(br) and run("git", "-C", path, "show-ref", "--verify", "--quiet", "refs/heads/" + br).returncode == 0
+r = (run("git", "-C", path, "worktree", "add", "--detach", wt, "origin/" + base) if not br
+     else run("git", "-C", path, "worktree", "add", wt, br) if has
+     else run("git", "-C", path, "worktree", "add", "--no-track", "-b", br, wt, "origin/" + base))
 if r.returncode: sys.exit(r.stderr)
 url = run("git", "-C", path, "remote", "get-url", "origin").stdout.strip()
 import re
 m = re.match(r"^(?:\w+://)?(?:[^@/]+@)?([^/:]+)[:/](.+?)(?:\.git)?/?$", url)
 meta["repos"].append({"name": name, "main": path, "wt": wt, "base": base, "host": m.group(1) if m else None, "project": m.group(2) if m else None})
 json.dump(meta, open(os.path.join(d, "meta.json"), "w"), ensure_ascii=False, indent=2)
-print("added %s: %s, branch %s from origin/%s" % (name, wt, meta["branch"], base))
+print("added %s: %s, %s from origin/%s" % (name, wt, ("branch " + br) if br else "no branch yet", base))
 EOF
 """
 
 
 def repos_md(m):
+    br = m.get("branch")
     if m["repos"]:
-        return "\n".join("- `%s/`: ветка `%s` от `origin/%s`, MR в `%s` (%s)" % (r["name"], m["branch"], r["base"], r["base"], r["project"]) for r in m["repos"])
+        return "\n".join(("- `%s/`: ветка `%s` от `origin/%s`, MR в `%s` (%s)" % (r["name"], br, r["base"], r["base"], r["project"]) if br else
+                          "- `%s/`: ветки пока нет, стоит на `origin/%s`; MR в `%s` (%s)" % (r["name"], r["base"], r["base"], r["project"])) for r in m["repos"])
     return ("- пока не выбраны. Выбери по задаче и добавь каждый командой "
-            "`%s/add-repo.sh <имя клона>`: она создаёт worktree ветки `%s` в папке задачи и записывает его в `meta.json`. "
-            "Клоны лежат в `%s`." % (m["dir"], m["branch"], m["repos_root"]))
+            "`%s/add-repo.sh <имя клона>`: она создаёт worktree %s в папке задачи и записывает его в `meta.json`. "
+            "Клоны лежат в `%s`." % (m["dir"], ("ветки `%s`" % br) if br else "ветки задачи (а пока её нет, на `origin/main`)", m["repos_root"]))
+
+
+def label(m):
+    """How the task is named to people and agents: KEY «title», or «title» for a task without a key."""
+    return "«%s»" % m["title"] if m.get("keyless") else "%s «%s»" % (m["key"], m["title"])
 
 
 def ctx_md(m):
@@ -202,7 +218,15 @@ def task_md(m):
             "### %s, %s\n\n%s" % (c["author"] or "—", c["when"], c["text"].strip() or "(пусто)") for c in m["yt_comments"])
     # My prompt comes first when there is one; the issue's own description follows it.
     task = ("## Задание\n\n%s\n\n## Описание из YouTrack\n\n%s" % (m["note"], m["desc"] or "(пусто)")) if m.get("note") else "## Задача\n\n%s" % (m["desc"] or "(описание не задано)")
-    return """# {key}: {title}
+    head = m["title"] if m.get("keyless") else "%s: %s" % (m["key"], m["title"])
+    if m.get("keyless"):
+        commits = ("- Ветки у задачи пока нет: worktree стоят на `origin/<база>` без ветки. Перед первым коммитом придумай "
+                   "короткое имя ветки на английском по смыслу задачи (kebab-case, например `fix-login-timeout`), создай её "
+                   "в каждом репозитории задачи (`git switch -c <имя>`, имя одно на все) и запиши его в `meta.json` в поле "
+                   "`branch`.\n- Коммить в каждом репозитории отдельно, сообщения пиши по смыслу изменений (номера у задачи нет).")
+    else:
+        commits = "- Коммить в каждом репозитории отдельно, сообщения начинай с `[%s]`." % m["key"]
+    return """# {head}
 
 {task}{link}{yt}
 
@@ -223,7 +247,7 @@ def task_md(m):
 
 - Работай в папках репозиториев выше: это git worktree веток задачи. В `context/` ничего не меняй.
 - У каждого репозитория свой `AGENTS.md`: прочитай его перед изменениями.
-- Коммить в каждом репозитории отдельно, сообщения начинай с `[{key}]`.
+{commits}
 - Не пушь и не создавай MR: это делает человек кнопкой в панели задачи.
 - Если меняется контракт между сервисами (HTTP, очереди, БД), проверь потребителей в других репозиториях задачи и, если в задаче есть репозиторий документации, обнови её по его README.
 - Других агентов, кроме ролей из `team.json`, не запускай.
@@ -231,10 +255,10 @@ def task_md(m):
 ## План и статус
 
 (ведёт исполнитель: план, решения, что сделано, как проверено; в конце строка «Статус: готово к MR»)
-""".format(key=m["key"], title=m["title"], task=task, link=link, yt=yt, repos=repos, ctx=ctx, preset=m["preset"])
+""".format(head=head, commits=commits, task=task, link=link, yt=yt, repos=repos, ctx=ctx, preset=m["preset"])
 
 
-AGENTS_MD = """# {key}: задача
+AGENTS_MD = """# Задача {name}
 
 Сначала прочитай `TASK.md`: там задача, репозитории, контекст, команда и правила.
 Репозитории задачи лежат в подпапках, у каждого свой `AGENTS.md`.
@@ -250,6 +274,13 @@ def write(path, text):
 def m_create(a):
     """The task folder, its worktrees and files. Returns meta.json's content."""
     d = expand(a["dir"])
+    idx = os.path.join(HOME, ".herdr/tasks")
+    if a.get("keyless"):
+        # A task without a key is named after its title: the folder gets -2, -3… when that name is taken.
+        base, n = d, 2
+        while os.path.exists(d) or os.path.lexists(os.path.join(idx, os.path.basename(d))):
+            d, n = "%s-%d" % (base, n), n + 1
+        a = dict(a, key=os.path.basename(d))
     if os.path.exists(d):
         raise Fail("task %s already exists (%s)" % (a["key"], d))
     os.makedirs(d)
@@ -272,6 +303,8 @@ def m_create(a):
             "created": int(time.time() * 1000), "dir": d, "on": a.get("on"), "ns": a["ns"], "preset": a["preset"], "agents": a["agents"],
             "repos_root": a["repos_root"], "repos": repos, "context": ctx, "yt_files": [], "yt_comments": a.get("yt_comments") or [],
             "note": a.get("note") or ""}
+    if a.get("keyless"):
+        meta["keyless"] = True
     os.makedirs(os.path.join(d, "context"))
     for c in ctx:
         os.symlink(c["path"], os.path.join(d, "context", c["link"]))
@@ -282,13 +315,12 @@ def m_create(a):
                 shutil.copy(f["path"], os.path.join(d, "context", "youtrack", os.path.basename(f["path"])))
                 meta["yt_files"].append({"file": os.path.basename(f["path"]), "name": f["name"], "where": f.get("where")})
     write(os.path.join(d, "TASK.md"), task_md(meta))
-    write(os.path.join(d, "AGENTS.md"), AGENTS_MD.format(key=a["key"]))
+    write(os.path.join(d, "AGENTS.md"), AGENTS_MD.format(name=label(meta)))
     os.symlink("AGENTS.md", os.path.join(d, "CLAUDE.md"))
     write(os.path.join(d, "add-repo.sh"), ADD_REPO_SH)
     os.chmod(os.path.join(d, "add-repo.sh"), 0o755)
     write(os.path.join(d, "meta.json"), json.dumps(meta, ensure_ascii=False, indent=2))
     # Redline lists tasks from ~/.herdr/tasks: a task kept elsewhere (inside its namespace) is linked there.
-    idx = os.path.join(HOME, ".herdr/tasks")
     if os.path.dirname(d) != idx:
         os.makedirs(idx, exist_ok=True)
         if not os.path.lexists(os.path.join(idx, a["key"])):
@@ -382,9 +414,9 @@ def m_team(a):
     return team
 
 
-CHAT_MD = """# {key}: чат по задаче
+CHAT_MD = """# Чат по задаче {name}
 
-Ты помогаешь по задаче {key} «{title}». Папка задачи: `{dir}`. Сначала прочитай `{dir}/TASK.md`: задача,
+Ты помогаешь по задаче {name}. Папка задачи: `{dir}`. Сначала прочитай `{dir}/TASK.md`: задача,
 репозитории (worktree в подпапках задачи), правила и раздел «План и статус», который ведёт исполнитель.
 Роли команды и их адреса для `hc send` в `{dir}/team.json`. Не пушь и не создавай MR.
 """
@@ -397,7 +429,7 @@ def m_chat_dir(a):
     while os.path.exists(os.path.join(d, ".agents", "chat-%d" % n)):
         n += 1
     f = os.path.join(d, ".agents", "chat-%d" % n)
-    write(os.path.join(f, "AGENTS.md"), CHAT_MD.format(key=a["key"], title=a["title"], dir=d))
+    write(os.path.join(f, "AGENTS.md"), CHAT_MD.format(name=label(a), dir=d))
     os.symlink("AGENTS.md", os.path.join(f, "CLAUDE.md"))
     return {"folder": f, "name": "chat-%d" % n}
 
@@ -774,7 +806,7 @@ def fill(text, values):
 
 def briefs(conf, meta, roles):
     p = conf["presets"][meta["preset"]]
-    values = {"key": meta["key"], "title": meta["title"], "dir": meta["dir"], "preset": meta["preset"]}
+    values = {"key": meta["key"], "name": label(meta), "title": meta["title"], "dir": meta["dir"], "preset": meta["preset"]}
     with open(os.path.join(MOD, "roles", p["flow"])) as h:
         values["flow"] = fill(h.read().strip(), values)
     out = {}
@@ -801,7 +833,7 @@ def launch(conf, ns, meta, resume):
     for role in roles:
         spec = role_spec(agents.get(role) or ns["roles"][role])
         folder = meta["dir"] if role == "impl" else os.path.join(meta["dir"], ".agents", role)
-        first = None if resume else "Ты %s в задаче %s. Прочитай %s/.agents/%s/BRIEF.md и действуй по нему." % (ROLE_NAMES.get(role, role), meta["key"], meta["dir"], role)
+        first = None if resume else "Ты %s в задаче %s. Прочитай %s/.agents/%s/BRIEF.md и действуй по нему." % (ROLE_NAMES.get(role, role), label(meta), meta["dir"], role)
         argv = agent_argv(ns, home, spec, resume)
         if first and images and spec["agent"] == "codex":
             # Codex attaches -i images to its first prompt; given without one it sends them alone, so the brief goes along.
@@ -813,7 +845,7 @@ def launch(conf, ns, meta, resume):
         if first:
             args["task"] = first
         if space is None:
-            r = app("space.new", name=("%s %s" % (meta["key"], meta["title"]))[:48], machine=on or "", tab=meta["key"], **args)
+            r = app("space.new", name=space_name(meta), machine=on or "", tab=meta["key"], **args)
             space = r["space"]
         else:
             r = app("tab.new", space=space, name=role, **args)
@@ -874,9 +906,15 @@ def all_tasks(conf, only=None):
     return out
 
 
+def space_name(m):
+    return (m["title"] if m.get("keyless") else "%s %s" % (m["key"], m["title"]))[:48]
+
+
 def task_space(spaces, m):
+    """The task's space: named KEY title (matched by the key), or its title for a task without a key."""
     for s in spaces:
-        if (s.get("machine") or None) == (m.get("on") or None) and (s.get("name") or "").split(" ")[0] == m["key"]:
+        name = s.get("name") or ""
+        if (s.get("machine") or None) == (m.get("on") or None) and (name == space_name(m) if m.get("keyless") else name.split(" ")[0] == m["key"]):
             return s
     return None
 
@@ -952,8 +990,11 @@ def cmd_start(conf, a):
                            for c in it.get("comments", [])]
     if not title:
         raise Fail("a task needs a title (--title) or a YouTrack issue (--yt)")
-    key = key or "T-" + time.strftime("%m%d%H%M")
-    if not re.match(r"^[A-Za-z][\w-]*-\d+$", key):
+    # No key: the task is named after its title (folder, `herdr-task open <name>`), its branch is made by the agent.
+    keyless = not key
+    if keyless:
+        key = slug(title)[:40].rstrip("-") or "task"
+    elif not re.match(r"^[A-Za-z][\w-]*-\d+$", key):
         raise Fail("task key looks like PROJ-123, got %r" % key)
     clones = on_machine(on, "repos", {"root": ns["repos"]})
     picked = []
@@ -978,10 +1019,10 @@ def cmd_start(conf, a):
     tasks_root = ns["tasks"].replace("~", home, 1)
     meta = on_machine(on, "create", {
         "dir": os.path.join(tasks_root, key), "key": key, "title": title, "desc": desc or "", "url": url,
-        "branch": branch_for(key, title), "repos": picked, "context": context,
+        "branch": "" if keyless else branch_for(key, title), "keyless": keyless, "repos": picked, "context": context,
         "on": on, "ns": ns_name, "preset": preset, "agents": team, "repos_root": ns["repos"], "yt_files": yt_files, "yt_comments": yt_comments, "note": (a.note or "").strip()})
     res = launch(conf, ns, meta, resume=False)
-    return {"key": key, "dir": meta["dir"], "branch": meta["branch"], "repos": [r["name"] for r in meta["repos"]],
+    return {"key": meta["key"], "keyless": keyless, "dir": meta["dir"], "branch": meta["branch"], "repos": [r["name"] for r in meta["repos"]],
             "preset": preset, "agents": team, "space": res["space"], "team": res["team"]}
 
 
@@ -1033,7 +1074,7 @@ def cmd_edit(conf, a):
         if a.add_context or a.rm_context:
             what.append("изменён контекст")
         text = ("Состав задачи %s изменился: %s. Перечитай разделы «Репозитории (меняем)» и «Контекст (только читать)» в %s/TASK.md."
-                % (meta["key"], "; ".join(what) or "изменён контекст", meta["dir"]))
+                % (label(meta), "; ".join(what) or "изменён контекст", meta["dir"]))
         for role, t in res["team"].items():
             if role == "chats" or not isinstance(t, dict) or not t.get("address"):
                 continue
@@ -1074,7 +1115,7 @@ def cmd_chat(conf, a):
             argv = [w, "resume", a.resume, "--no-daemon", "--dangerously-bypass-approvals-and-sandbox"] + (["-m", a.model] if a.model else [])
         first = None
     else:
-        made = on_machine(on, "chat_dir", {"dir": m["dir"], "key": m["key"], "title": m["title"]})
+        made = on_machine(on, "chat_dir", {"dir": m["dir"], "key": m["key"], "title": m["title"], "keyless": m.get("keyless")})
         folder, name = made["folder"], a.name or made["name"]
         argv = agent_argv(ns, home, spec, False)
         first = a.message or None
@@ -1157,7 +1198,7 @@ def main():
     s.add_argument("--ns")
     s.add_argument("--machine", default="", help="with no --ns: the namespace of this machine (and of the repo paths)")
     s.add_argument("--yt", help="a YouTrack issue key: title and description come from it")
-    s.add_argument("--key")
+    s.add_argument("--key", help="PROJ-123: the branch KEY/title and [KEY] in commits; none: the agent names the branch")
     s.add_argument("--title")
     s.add_argument("--desc")
     s.add_argument("--desc-file")

@@ -21,7 +21,8 @@ const when = (sec) => { const d = new Date(sec * 1000), now = new Date(); return
 const CYR = Object.fromEntries([..."абвгдеёжзийклмнопрстуфхцчшщъыьэюя"].map((c, i) =>
   [c, "a b v g d e e zh z i y k l m n o p r s t u f h ts ch sh sch _ y _ e yu ya".split(" ")[i]]));
 const slug = (s) => [...String(s).toLowerCase()].map((c) => CYR[c] ?? c).join("").replace(/_/g, "").replace(/[^a-z0-9]+/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "");
-const branchFor = (key, title) => `${key || "KEY"}/${slug(title).slice(0, 48).replace(/-+$/, "") || "task"}`;
+// No key: there is no branch yet, the agent makes one when it starts committing.
+const branchFor = (key, title) => (key ? `ветка ${key}/${slug(title).slice(0, 48).replace(/-+$/, "") || "task"}` : "ветку агент назовёт сам");
 
 function ht(args, timeout = 120000) {
   return exec("sh", ["-c", 'exec "$HOME/.config/herdr-app/bin/herdr-task" "$@"', "herdr-task", ...args], { timeout });
@@ -133,7 +134,7 @@ class Launch {
   constructor(owner, ns, issue, cx) {
     this.o = owner; this.ns = ns; this.issue = issue; // issue: a board row, or null for a task of our own
     const known = issue ? owner.issues[issue.key] : null;
-    this.key = InputState.new({ placeholder: "Ключ, например PROJ-123 (пусто: T-<дата>)" });
+    this.key = InputState.new({ placeholder: "Номер, если есть: PROJ-123" });
     this.title = InputState.new({ placeholder: "Что сделать, коротко" });
     this.title.on("change", (_e, cx) => cx.notify()); this.key.on("change", (_e, cx) => cx.notify());
     // The prompt: what the agents are to do, in my words. For an issue the YouTrack description goes along anyway.
@@ -195,7 +196,7 @@ class Launch {
 
   start(cx) {
     const key = this.key.value().trim(), title = this.issue ? this.issue.title : this.title.value().trim();
-    if (!this.issue && key && !/^[A-Za-z][\w-]*-\d+$/.test(key)) { this.error = "Ключ вида PROJ-123, или оставьте пустым."; cx.notify(); return; }
+    if (!this.issue && key && !/^[A-Za-z][\w-]*-\d+$/.test(key)) { this.error = "Номер вида PROJ-123, или оставьте пустым."; cx.notify(); return; }
     if (!title) { this.error = "Напишите, что сделать."; cx.notify(); return; }
     const team = Object.entries(this.team).map(([r, s]) => `${r}=${s.agent}:${s.model}`).join(",");
     const args = ["start", "--ns", this.ns, "--preset", this.preset, "--team", team];
@@ -249,9 +250,9 @@ class Launch {
       ...(this.issue && nFiles ? [["Вложения", atts.length ? `${atts.map((a) => a.name).join(", ")}; картинки придут с первым сообщением` : "не передаются"]] : []),
       ...(this.issue && nComments ? [["Комментарии", this.withComments ? `${nComments}, в TASK.md` : "не передаются"]] : []),
       ["Материалы", [...this.files.map((f) => f.split("/").slice(-2).join("/")), ...(docs ? ["страницы документации из docs"] : [])].join(", ") || "нет"],
-      ["Репозитории", this.picked.size ? `${[...this.picked].join(", ")}; ветка ${branchFor(key, title)}` : "агент выберет сам"],
+      ["Репозитории", this.picked.size ? `${[...this.picked].join(", ")}; ${branchFor(key, title)}` : "агент выберет сам"],
       ["Команда", Object.entries(this.team).map(([r, sp]) => `${ROLE[r] ?? r}: ${sp.agent === "claude" ? "Claude" : "Codex"}${sp.model ? ` ${sp.model}` : ""}`).join(", ")],
-      ["Правила", "работать в worktree задачи, коммиты с ключом, не пушить и не открывать MR, вести «План и статус» в TASK.md"],
+      ["Правила", `работать в worktree задачи, ${key ? "коммиты с ключом" : "ветку и сообщения коммитов агент придумает сам"}, не пушить и не открывать MR, вести «План и статус» в TASK.md`],
     ];
     const form = v_flex().id("tk-launch").flex_1().min_h(0).overflow_y_scrollbar().px(18).pb(18)
       .when(!this.issue, (x) => x
@@ -267,7 +268,7 @@ class Launch {
       .child(u.section("Репозитории", this.picked.size ? `${this.picked.size} выбрано` : "не выбраны: агент выберет сам"))
       .child(h_flex().flex_wrap().gap(6).children(clones.map(repoChip))
         .when(!this.clones && !this.error, (x) => x.child(div().text_size(11.5).text_color(t.dim).child("Ищу клоны…"))))
-      .child(div().pt(8).text_size(11.5).text_color(t.dim).child(`${this.guess.size ? "• назван в тексте задачи. " : ""}Ветка ${branchFor(key, title)} от main, у каждого репозитория своя копия (worktree) в папке задачи.`))
+      .child(div().pt(8).text_size(11.5).text_color(t.dim).child(`${this.guess.size ? "• назван в тексте задачи. " : ""}${key ? `В${branchFor(key, title).slice(1)} от main` : "Ветку от main агент назовёт сам"}, у каждого репозитория своя копия (worktree) в папке задачи.`))
       .child(u.section("Команда", p?.about))
       .child(h_flex().child(u.seg("tk-preset", presets.map(([n, x]) => [n, x.label ?? n]), this.preset, (v) => { this.preset = v; this.syncTeam(); })))
       .child(v_flex().pt(10).gap(10).children(Object.entries(this.team).map(([r, s]) => h_flex().gap(12).items_start()
@@ -534,7 +535,7 @@ export default class Tasks extends View {
       .child(this.caption("В работе", null, t))
       .child(this.head(cols, t))
       .children(list.map((m, i) => this.row(`tk-w-${i}`, this.sel?.key === m.key, [
-        [m.key, 96, t.muted], [m.title],
+        [m.keyless ? "—" : m.key, 96, t.muted], [m.title],
         ...(narrow ? [] : [[m.open ? "открыт" : "закрыт", 110, m.open ? t.ansi2 : t.dim], [m.chats ? String(m.chats) : "—", 70, t.muted]]),
       ], (cx) => this.pick({ kind: "task", key: m.key }, cx), t)));
   }
@@ -593,7 +594,7 @@ export default class Tasks extends View {
         : u.btn("tk-take", "Взять в работу", (cx) => { this.startLaunch(cx); cx.notify(); }, { primary: true, tooltip: "Выбрать репозитории, команду и материалы, потом запустить" });
     const head = v_flex().px(18).pt(14).pb(12).gap(8).border_b(1).border_color(t.border)
       .child(h_flex().gap(6).items_center()
-        .child(div().flex_1().text_size(12).text_color(t.muted).child(it ? `${this.sel.key} · ${it.state}` : this.sel.key))
+        .child(div().flex_1().text_size(12).text_color(t.muted).child(it ? `${this.sel.key} · ${it.state}` : m?.keyless ? "без номера" : this.sel.key))
         .when(Boolean(it), (x) => x
           .child(u.btn("tk-yt", "YouTrack ↗", () => openUrl(it.url))))
         .child(close))
@@ -718,7 +719,7 @@ export default class Tasks extends View {
     const chats = Array.isArray(list) ? list : [];
     return v_flex().id("tk-task").flex_1().min_h(0).overflow_y_scrollbar().px(18).pb(18)
       .child(u.section("Задача"))
-      .child(kv("Ветка", m.branch))
+      .child(kv("Ветка", m.branch || "агент ещё не создал"))
       .child(kv("Репозитории", (m.repos ?? []).map((r) => r.name).join(", ") || "агент выберет сам"))
       .when(team.length > 0, (x) => x.children(team.map(([r, a]) => kv(ROLE[r] ?? r, [a.agent === "claude" ? "Claude" : "Codex", a.model || "модель по умолчанию"].join(" · ")))))
       .child(kv("Папка", m.dir))
