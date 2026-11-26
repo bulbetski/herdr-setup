@@ -371,17 +371,16 @@ export default class Agents extends View {
           else if (this.hovered === a.address) this.hovered = null;
           cx.notify();
         })
-        // Pressed, it may be dragged: onto another folder, here or in the sidebar.
-        .on_mouse_down("left", (_e, cx) => {
+        // Pressed, it may be dragged: onto another folder, here or in the sidebar. The drag starts only once
+        // the pointer moves away (see lift): it shows the empty folders it could go to, and the rows moving
+        // under a plain click would take the click away from this row.
+        .on_mouse_down("left", (e, cx) => {
           const space = spaces().find((s) => s.id === a.space);
           if (!space || collapsed) return;
-          this.drag = { space: a.space, machine: space.machine ?? null, address: a.address, from: groupOf.get(a.address)?.id ?? null };
-          this.over = null;
-          setShared(DRAG, { space: a.space, machine: space.machine ?? null, address: a.address });
-          cx.notify();
+          this.press = { space: a.space, machine: space.machine ?? null, address: a.address, from: groupOf.get(a.address)?.id ?? null, at: e.position };
         })
-        .on_mouse_move((e, cx) => aimAt(a.pinned ? null : groupOf.get(a.address), cx, e))
-        .on_click(() => run("pane.focus", { pane: a.pane }))
+        .on_mouse_move((e, cx) => { lift(e, cx); aimAt(a.pinned ? null : groupOf.get(a.address), cx, e); })
+        .on_click(() => { this.press = null; run("pane.focus", { pane: a.pane }); })
         .when(Boolean(pic), el => el.child(div().id(`agent-fold-${a.address}`)
           .when(subs.length > 0, el => el.on_click((_e, cx) => {
             cx.stop_propagation();
@@ -403,6 +402,16 @@ export default class Agents extends View {
     const groups = pinned.length ? [{ id: "pinned", label: "Pinned", status: null, members: pinned }] : [];
     // The agent being dragged, while its drag is on, and the folders its space can go to.
     const drag = this.drag && shared(DRAG)?.address === this.drag.address ? this.drag : null;
+    // A press on an agent becomes its drag once the pointer has gone a few pixels from where it was pressed.
+    const lift = (e, cx) => {
+      const p = this.press;
+      if (!p || this.drag || Math.hypot(e.position.x - p.at.x, e.position.y - p.at.y) < 5) return;
+      this.press = null;
+      this.drag = { space: p.space, machine: p.machine, address: p.address, from: p.from };
+      this.over = null;
+      setShared(DRAG, { space: p.space, machine: p.machine, address: p.address });
+      cx.notify();
+    };
     const takes = (g) => Boolean(drag && byFolder && g?.id?.startsWith("fo-")
       && (g.machine ?? null) === drag.machine && g.id !== drag.from);
     if (byFolder) {
@@ -483,6 +492,7 @@ export default class Agents extends View {
 
     // Let go here: onto the folder it's over, if any; a press anywhere else ends a drag let go of outside.
     const endDrag = (cx) => {
+      this.press = null;
       if (!this.drag && !shared(DRAG)) return;
       this.drag = null;
       this.over = null;
@@ -528,6 +538,7 @@ export default class Agents extends View {
       .child(v_flex().id("ag-list").flex_1().min_h(0).px(collapsed ? 0 : 8).overflow_y_scrollbar().mode("always").children(rows)
         // Moved over the list but no group: nothing to drop on.
         .on_mouse_move((e, cx) => {
+          lift(e, cx);
           const mine = this.aimed && this.aimed.x === e.position.x && this.aimed.y === e.position.y;
           if (!mine && drag && this.over) { this.over = null; cx.notify(); }
         }))
